@@ -1,0 +1,73 @@
+label	description
+DRAW    En sida med en ritning, karta, målning eller ett schema med textetiketter
+DRAW    En sida med en ritning eller karta presenterad i tabellform eller med en tabelllegend
+DRAW    En ritning, karta, målning, skiss, diagram, schema eller grafisk figur med etiketter på en dokumentsida
+DRAW    En ritning, karta, målning, skiss, diagram, schema eller grafisk figur med tillhörande tabell eller tabelllegend på en dokumentsida
+DRAW    En sida med ritningar, kartor, målningar, scheman eller grafik
+DRAW    En sida med ritningar eller kartor presenterade i tabellform
+DRAW    Ritningar, kartor eller diagram
+DRAW    En tabell eller tabelllegend tillsammans med ritningar, kartor eller diagram
+DRAW    Ritningar, kartor, målningar, scheman eller grafik med etiketter
+DRAW    Ritningar, kartor, målningar, scheman eller grafik med tabelllegend, i tabell eller formulär
+
+LINE_HW En sida med handskriven text i tabellform eller ett manuellt ifyllt formulär
+LINE_HW En tabell eller ett ifyllt formulär med handskrivna textrader på en dokumentsida
+LINE_HW En tabell eller ett ifyllt formulär med handskrivna texter
+LINE_HW En tabell eller ett ifyllt formulär med handskrivna celler
+LINE_HW En handskriven tabell eller ett ifyllt formulär
+
+LINE_PT En sida med tryckt text i tabellform eller en stor tryckt tabell som fyller hela sidan
+LINE_PT En sida med maskinskriven text i tabellform eller ett formulär fyllt med maskinskriven text
+LINE_PT En tabell eller ett ifyllt formulär med tryckta textrader på en dokumentsida
+LINE_PT En tabell eller ett ifyllt formulär med maskinskrivna textrader på en dokumentsida
+LINE_PT En tabell eller ett ifyllt formulär med tryckta celler
+LINE_PT En tabell eller ett ifyllt formulär med maskinskrivna celler
+LINE_PT En tryckt tabell eller ett ifyllt formulär
+LINE_PT En maskinskriven tabell eller ett ifyllt formulär
+
+PHOTO   En sida med ett fotografi eller en fotografisk bild med textetiketter
+PHOTO   En sida med ett fotografi presenterat i tabellform eller med en tabelllegend
+PHOTO   Ett foto eller ett fotoutklipp med etiketter fästa på en dokumentsida
+PHOTO   Ett foto eller ett fotoutklipp med tillhörande tabell eller tabelllegend på en dokumentsida
+PHOTO   Fotografier eller fotoutklipp fästa på en dokumentsida
+PHOTO   Fotografier eller fotoutklipp med tabell eller tabelllegend
+PHOTO   Fotografier eller fotoutklipp på en sida
+PHOTO   Fotografier eller fotoutklipp tillsammans med en tabell
+
+TEXT    En sida med blandad handskriven, tryckt eller maskinskriven text, exempelvis en bok- eller tidningssida med handskrivna kommentarer
+TEXT    En dokumentsida med blandade tryckta och handskrivna textstilar
+TEXT    En sida med blandade textstilar
+TEXT    Tryckt och handskriven text på en sida
+
+TEXT_HW En sida med enbart handskriven text i stycken, såsom fältdagböcker eller anteckningsböcker
+TEXT_HW Handskriven löptext, handskrivna stycken eller handskrivna listor på en dokumentsida
+TEXT_HW En sida med handskriven text
+TEXT_HW En handskriven textsida
+
+TEXT_PT En sida med enbart tryckt text i stycken, listor eller ren löptext, såsom en artikelsida eller en bokscanning
+TEXT_PT En sida med enbart maskinskriven text i stycken, listor eller löptext, såsom äldre fältrapporter
+TEXT_PT Tryckt löptext, tryckta stycken eller tryckta listor på en dokumentsida
+TEXT_PT Maskinskriven löptext, maskinskrivna stycken eller maskinskrivna listor på en dokumentsida
+TEXT_PT En tryckt textsida
+TEXT_PT En maskinskriven textsida
+TEXT_PT En maskinskriven dokumentsida
+
+LINE_MIX    En tabell eller ett ifyllt formulär med blandade handskrivna, tryckta och maskinskrivna textrader
+LINE_MIX    En dokumentsida med blandade textstilar i tabellform eller strukturerat formulär
+LINE_MIX    En sida med handskrivna, tryckta och maskinskrivna poster blandade i samma tabell
+LINE_MIX    Ett formulär fyllt med en kombination av handskriven, tryckt och maskinskriven text
+LINE_MIX    En tabell med blandade textstilar i rader och kolumner
+LINE_MIX    En strukturerad dokumentsida med blandade handskrivna, tryckta och maskinskrivna anteckningar
+LINE_MIX    En sida med blandade textposter organiserade i tabell eller formulär
+LINE_MIX    En dokumentsida med rader av blandade textstilar
+LINE_MIX    En tabellsida med heterogena textstilar i varje rad
+
+MISC    En blandad dokumentsida såsom omslag, titelsida eller förtext
+MISC    En dokumentsida med paratextuellt material eller icke-innehållselement
+MISC    En sida såsom bokomslag, rygg eller serietitelsida med minimal text
+MISC    En arkivsida med dekorativa eller strukturella element snarare än innehåll
+MISC    En förtext- eller paratextsida utanför dokumentets huvudinnehåll
+MISC    En dokumentsida med icke-textuella eller icke-innehållsliga inslag
+MISC    En volymomslagssida eller titelsida med sparsam eller oregelbunden text
+MISC    En blandad sida med layout-element snarare än innehållstext
+MISC    En paratextuell eller dekorativ dokumentsida utanför huvudtexten

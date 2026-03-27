@@ -4,43 +4,46 @@ FOLDER_CPOINTS=./model_checkpoints
 FOLDER_MODELS=./models
 
 [EVAL]
-FOLDER_PAGES=./category_samples
+FOLDER_PAGES=C:\\RA-CLIP\\test_set
 
 [TRAIN]
-FOLDER_PAGES=/lnet/work/projects/atrium/transformers/pages/train_5
+FOLDER_PAGES=C:\\RA-CLIP\\Dataset_03_24
 
-test_size = 0.1
+test_size = 0.2
 log_step = 10
-epochs = 7
+epochs = 5
 lr = 1e-5
 max_categ = 14000
 max_categ_e = 3000
-
+plot_embeddings = False
 Training = False
 Testing = False
 
 [SETUP]
-files_format = png
-seed = 420
+files_format = jpg
+seed = 666
 base_model = ViT-B/16
-batch = 16
-top_N = 1
+batch = 9
+top_N = 2
 raw = False
 
-categories_file = ./category_descriptions/TOTAL_page_categories.tsv
 
+categories_file = ./category_descriptions/SWE_page_categories.csv
+prompt_path = ./category_descriptions/prompts/dataset_prompts.tsv
 zero_shot = False
 avg = False
 visualize = False
 description_folder = ./category_descriptions
 categories_prefix = page_categories
-
-model_storage = /lnet/work/projects/atrium/cache/clip
+one2one = False
+ensemble = True
+metadata_path = C:\\RA-CLIP\\Dataset_03_24\trying_images.csv
+model_storage = C:\\ufal\\atrium-page-classification
 
 [INPUT]
-FOLDER_INPUT=./category_samples
+FOLDER_INPUT=C:\\RA-CLIP\\test_set
 chunk_size = 1000
-
+advanced_split = True
 [HF]
 repo_name = ufal/clip-historical-page
 token = hf_qViUKX....ixyJpjstNxGO

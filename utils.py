@@ -12,10 +12,16 @@ import scipy.special
 
 # get list of all files in the folder and nested folders by file format
 def directory_scraper(folder_path: Path, file_format: str = "png", file_list: list = None) -> list[str]:
+    #for form in file_format:
+    #    try:
+    #        form_len = 0
     if file_list is None:
         file_list = []
     file_list += list(folder_path.rglob(f"*.{file_format}"))
+            #form_len = len(file_list)-form_len
     print(f"[ {file_format.upper()} ] \tFrom directory {folder_path} collected {len(file_list)} {file_format} files")
+        #except Exception as e:
+        #    print(f"[ERROR] Could not collect {form} files from {folder_path}: {e}")
     return file_list
 
 
@@ -200,3 +206,175 @@ def append_to_csv(df, filepath):
         df.to_csv(filepath, index=False, sep=",")
     else:
         df.to_csv(filepath, mode="a", header=False, index=False, sep=",")
+
+
+# Source - https://stackoverflow.com/a/34304414
+# Posted by Franck Dernoncourt, modified by community. See post 'Timeline' for change history
+# Retrieved 2026-03-19, License - CC BY-SA 4.0
+
+def show_values(pc, fmt="%.2f", **kw):
+    '''
+    Heatmap with text in each cell with matplotlib's pyplot
+    Source: https://stackoverflow.com/a/25074150/395857 
+    By HYRY
+    '''
+    ax = plt.gca()
+
+    # Hämta värdena som en 1D-array och forma om till 2D
+    data = pc.get_array()
+    if data.ndim == 1:
+        # pcolormesh flattenar värdena radvis
+        ny, nx = pc._meshHeight, pc._meshWidth  # fungerar i äldre versioner
+        try:
+            data = data.reshape(ny, nx)
+        except Exception:
+            # fallback: använd heatmapens shape
+            data = data.reshape(ax.images[0].get_array().shape)
+
+    # Loopa över cellerna baserat på index
+    ny, nx = data.shape
+    for i in range(ny):
+        for j in range(nx):
+            value = data[i, j]
+
+            # extrahera scalar
+            if hasattr(value, "item"):
+                value = value.item()
+
+            # cellens mittpunkt = index + 0.5
+            ax.text(
+                j + 0.5,
+                i + 0.5,
+                fmt % value,
+                ha="center",
+                va="center",
+                color="black",
+            )
+
+
+def cm2inch(*tupl):
+    '''
+    Specify figure size in centimeter in matplotlib
+    Source: https://stackoverflow.com/a/22787457/395857
+    By gns-ank
+    '''
+    inch = 2.54
+    if type(tupl[0]) == tuple:
+        return tuple(i/inch for i in tupl[0])
+    else:
+        return tuple(i/inch for i in tupl)
+
+
+def heatmap(AUC, title, xlabel, ylabel, xticklabels, yticklabels, figure_width=40, figure_height=20, correct_orientation=False, cmap='RdBu'):
+    '''
+    Inspired by:
+    - https://stackoverflow.com/a/16124677/395857 
+    - https://stackoverflow.com/a/25074150/395857
+    '''
+
+    # Plot it out
+    fig, ax = plt.subplots()    
+    #c = ax.pcolor(AUC, edgecolors='k', linestyle= 'dashed', linewidths=0.2, cmap='RdBu', vmin=0.0, vmax=1.0)
+    c = ax.pcolor(AUC, edgecolors='k', linestyle= 'dashed', linewidths=0.2, cmap=cmap)
+
+    # put the major ticks at the middle of each cell
+    ax.set_yticks(np.arange(AUC.shape[0]) + 0.5, minor=False)
+    ax.set_xticks(np.arange(AUC.shape[1]) + 0.5, minor=False)
+
+    # set tick labels
+    #ax.set_xticklabels(np.arange(1,AUC.shape[1]+1), minor=False)
+    ax.set_xticklabels(xticklabels, minor=False)
+    ax.set_yticklabels(yticklabels, minor=False)
+
+    # set title and x/y labels
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)      
+
+    # Remove last blank column
+    plt.xlim( (0, AUC.shape[1]) )
+
+    # Turn off all the ticks
+    ax = plt.gca()    
+    for t in ax.xaxis.get_major_ticks():
+        t.tick1On = False
+        t.tick2On = False
+    for t in ax.yaxis.get_major_ticks():
+        t.tick1On = False
+        t.tick2On = False
+
+    # Add color bar
+    plt.colorbar(c)
+
+    # Add text in each cell 
+    show_values(c)
+
+    # Proper orientation (origin at the top left instead of bottom left)
+    if correct_orientation:
+        ax.invert_yaxis()
+        ax.xaxis.tick_top()       
+
+    # resize 
+    fig = plt.gcf()
+    #fig.set_size_inches(cm2inch(40, 20))
+    #fig.set_size_inches(cm2inch(40*4, 20*4))
+    fig.set_size_inches(cm2inch(figure_width, figure_height))
+
+
+
+def plot_classification_report(classification_report, title='Classification report ', cmap='RdBu'):
+    '''
+    Plot scikit-learn classification report.
+    Extension based on https://stackoverflow.com/a/31689645/395857 
+    '''
+    lines = classification_report.split('\n')
+    #print(classification_report)
+    classes = []
+    plotMat = []
+    support = []
+    class_names = []
+    for line in lines[2 : (len(lines) - 2)]:
+        t = line.strip().split()
+        if len(t) < 2:
+            continue
+
+        # slå ihop tvåordsklasser som "macro avg" och "weighted avg"
+        if t[0] in ("macro", "weighted","accuracy"): #and t[1] == "avg":
+            #t[0] = t[0] + "_" + t[1]   # macro_avg / weighted_avg
+            #t.pop(1)                   # ta bort "avg"
+        #if t[0] == "accuracy":
+            continue
+        classes.append(t[0])
+
+        # nu är t t.ex. ["macro_avg", "0.899", "0.932", "0.914", "225"]
+        v = [float(x) for x in t[1: len(t) - 1]]
+        support.append(int(t[-1]))
+        class_names.append(t[0])
+        plotMat.append(v)
+
+
+
+    #print('plotMat: {0}'.format(plotMat))
+    #print('support: {0}'.format(support))
+
+    xlabel = 'Metrics'
+    ylabel = 'Classes'
+    xticklabels = ['Precision', 'Recall', 'F1-score']
+    yticklabels = ['{0} ({1})'.format(class_names[idx], sup) for idx, sup  in enumerate(support)]
+    figure_width = 25
+    figure_height = len(class_names) + 7
+    correct_orientation = False
+    heatmap(np.array(plotMat), title, xlabel, ylabel, xticklabels, yticklabels, figure_width, figure_height, correct_orientation, cmap=cmap)
+
+
+def main_class_report(clsrprt,name="test_plot_classif_report.png"):
+
+
+    plot_classification_report(clsrprt)
+    plt.savefig(name, dpi=200, format='png', bbox_inches='tight')
+    plt.close()
+
+#if __name__ == "__main__":
+#    main()
+    #cProfile.run('main()') # if you want to do some profiling
+

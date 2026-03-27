@@ -39,9 +39,10 @@ class ImageFolderCustom(torch.utils.data.Dataset):
     """
 
     def __init__(self, targ_dir: str, seed: int, max_category_samples: int | None,
-                 img_size: int, preprocess_fn: callable = None, model_name: str = "ViT",
+                 img_size: int,prompt_path: str | None = None, preprocess_fn: callable = None, model_name: str = "ViT",
                  ignore_dir: str = None, use_advanced_split: bool = True, split_type: str = 'train',
-                 file_format: str = "png", test_ratio: float = 0.1, safety: bool = True) -> None:
+                 file_format: str = "png", test_ratio: float = 0.1, safety: bool = True, avg: bool = False,
+                 one_2_one: bool = False,ensemble: bool = False) -> None:
         self.targ_dir = targ_dir
         self.max_category_samples = max_category_samples
         self.preprocess = preprocess_fn
@@ -56,7 +57,9 @@ class ImageFolderCustom(torch.utils.data.Dataset):
         self.file_format = file_format
         self.eval_ratio = test_ratio
         self.safe_load = safety
-
+        self.ensemble = ensemble
+        self.avg = avg
+        self.one_2_one = one_2_one
         all_categories = sorted(entry.name for entry in os.scandir(targ_dir) if entry.is_dir())
 
         if not all_categories:
@@ -64,8 +67,8 @@ class ImageFolderCustom(torch.utils.data.Dataset):
 
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(all_categories)}
         self.classes = all_categories
-
         # print(f"Discovered categories: {self.classes}")
+
 
         for category_name in self.classes:
             category_path = Path(targ_dir) / category_name
@@ -88,6 +91,55 @@ class ImageFolderCustom(torch.utils.data.Dataset):
             for file_path in all_files_in_category:
                 self.paths.append(file_path)
                 self.targets.append(class_idx)
+
+        if prompt_path is not None:
+            df = pd.read_csv(prompt_path, sep="\t")
+
+            # filename → prompt
+            prompt_map = {
+                os.path.basename(row["filename"]): row["prompt"]
+                for _, row in df.iterrows()
+            }
+
+            # matcha exakt mot self.paths
+            self.prompts = [
+                prompt_map.get(os.path.basename(p), "")
+                for p in self.paths
+            ]
+        else:
+            self.prompts = [""] * len(self.paths)
+
+        assert len(self.prompts) == len(self.paths), \
+            f"Prompt mismatch: {len(self.prompts)} prompts for {len(self.paths)} images"
+
+        def _load_prompts_by_class(tsv_path, class_col="class", prompt_col="prompt"):
+            df = pd.read_csv(tsv_path, sep="\t")
+            prompts_by_class = {}
+            for _, r in df.iterrows():
+                cls = r[class_col]
+                p = str(r[prompt_col])
+                prompts_by_class.setdefault(cls, []).append(p)
+            return prompts_by_class
+
+        self.prompts_by_class = {}
+        self.prompts_by_file = {}
+        if prompt_path is not None and os.path.exists(prompt_path) and not self.ensemble:
+            try:
+                self.prompts_by_class = _load_prompts_by_class(prompt_path, class_col="class", prompt_col="prompt")
+                print(f"Loaded prompts for {len(self.prompts_by_class)} classes from {prompt_path}")
+            except Exception as e:
+                print(f"Could not load prompts_by_class from {prompt_path}: {e}")
+
+        if prompt_path is not None and os.path.exists(prompt_path):
+            try:
+                df = pd.read_csv(prompt_path, sep="\t")
+                self.prompts_by_file = (
+                df.groupby("filename")["prompt"]
+                .apply(list)
+                .to_dict())
+                print(f"Loaded prompts for {len(self.prompts_by_file)} files from {prompt_path}")
+            except Exception as e:
+                print(f"Could not load prompts_by_file from {prompt_path}: {e}")
 
         # Apply splitting strategy
         if self.use_advanced_split:
@@ -135,7 +187,6 @@ class ImageFolderCustom(torch.utils.data.Dataset):
                 train_files = np.array(split_data['train'])
                 val_files = np.array(split_data['val'])
                 test_files = np.array(split_data['test'])
-
                 train_labels = map_paths_to_labels(split_data['train'], self.class_to_idx)
                 val_labels = map_paths_to_labels(split_data['val'], self.class_to_idx)
                 test_labels = map_paths_to_labels(split_data['test'], self.class_to_idx)
@@ -187,23 +238,50 @@ class ImageFolderCustom(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.paths)
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index):
         try:
             img = self.load_image(index)
             img.load()
+
             class_idx = self.targets[index]
+            filename = os.path.basename(self.paths[index])
 
             if self.preprocess:
-                transformed_img = self.preprocess(img)
-            else:
-                transformed_img = img
+                img = self.preprocess(img)
 
-            return transformed_img, class_idx
+            # Retrieve precomputed prompts
+            label_name = self.classes[class_idx]
+            prompts = self.prompts_by_file.get(filename, [])
+
+            if not prompts:
+                prompts = ["EMPTY PROMPT"]  # Fallback if no prompt found for the file
+
+            # 2. Om prompts är en sträng → gör det till lista
+            if isinstance(prompts, str):
+                prompts = [prompts]
+
+            # 3. Om prompts är tom lista → fallback
+            if len(prompts) == 0:
+                prompts = ["EMPTY PROMPT"]
+
+            if self.ensemble:
+                # Return list of prompts
+                return img, class_idx, prompts
+
+            elif self.one_2_one:
+                # Return a single prompt
+                return img, class_idx, prompts[0] if prompts else ""
+
+            else:
+                # avg mode: no prompts used
+                return img, class_idx, ""
+
         except OSError as e:
             print(f"Skipping image at path {self.paths[index]} due to error: {e}")
             dummy_image = torch.zeros(3, self.size, self.size)
             dummy_label = 0
-            return dummy_image, dummy_label
+            return dummy_image, dummy_label, "" if not self.ensemble else [""]
+
 
 # Added from few_shot_finetuning.py for balanced sampling during training
 class CLIP_BalancedBatchSampler(torch.utils.data.sampler.BatchSampler):

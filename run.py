@@ -58,8 +58,8 @@ if __name__ == "__main__":
     # Read the configuration file
     config.read('config.txt')
 
-    def_categ = ["DRAW", "DRAW_L", "LINE_HW", "LINE_P", "LINE_T", "PHOTO", "PHOTO_L", "TEXT", "TEXT_HW", "TEXT_P", "TEXT_T"]
-
+    #def_categ = ["DRAW", "DRAW_L", "LINE_HW", "LINE_P", "LINE_T", "PHOTO", "PHOTO_L", "TEXT", "TEXT_HW", "TEXT_P", "TEXT_T"]
+    def_categ = ["DRAW", "LINE_MIX", "LINE_HW", "LINE_PT", "PHOTO", "TEXT", "TEXT_HW", "TEXT_PT","MISC"]
     seed = config.getint('SETUP', 'seed')
     batch = config.getint('SETUP', 'batch')  # depends on GPU/CPU capabilities
     top_N = config.getint('SETUP', 'top_N')  # top N predictions, 3 is enough, 11 for "raw" scores (most scores are 0)
@@ -73,6 +73,10 @@ if __name__ == "__main__":
     categ_file = config.get('SETUP', 'categories_file')  # file with category descriptions
     categ_directory = config.get('SETUP', 'description_folder')  # directory with category description files
 
+    one_2_one = config.getboolean('SETUP', 'one2one') # whether to use one-to-one filename-prompt matching (instead of category-based prompts) for training and evaluation, requires prompt_path to be set
+    prompt_path = config.get('SETUP', 'prompt_path')  # path to TSV file with filename-prompt mapping for one-to-one training/evaluation
+    ensemble = config.getboolean('SETUP', 'ensemble')  # whether to use ensemble of models for prediction (only for evaluation, not for training)
+    metadata_path = config.get('SETUP', 'metadata_path')  # category description templates with metadata placeholder for formatting
     Training = config.getboolean('TRAIN', 'Training')
     Testing = config.getboolean('TRAIN', 'Testing')
     HF = config.getboolean('HF', 'use_hf')
@@ -87,14 +91,14 @@ if __name__ == "__main__":
 
     test_dir = config.get('INPUT', 'FOLDER_INPUT')
     chunk_size = config.getint('INPUT', 'chunk_size')
-
+    advanced_split = config.getboolean('INPUT', 'advanced_split')  # whether to use advanced split for creating train/test datasets (only for training, not for evaluation)
     epochs = config.getint("TRAIN", "epochs")
     max_categ = config.getint("TRAIN", "max_categ")  # max number of category samples
     max_categ_e = config.getint("TRAIN", "max_categ_e")  # max number of category samples for evaluation
     log_step = config.getint("TRAIN", "log_step")
     test_size = config.getfloat("TRAIN", "test_size")
     learning_rate = config.getfloat("TRAIN", "lr")
-
+    plot_embeddings = config.getboolean("TRAIN", "plot_embeddings")
     zero_shot = config.getboolean('SETUP', 'zero_shot')  # zero-shot prediction without training
     visualize = config.getboolean('SETUP', 'visualize')  # visualize model accuracy statistics
     download_root = config.get('SETUP', 'model_storage')  # root directory for downloading datasets
@@ -127,7 +131,7 @@ if __name__ == "__main__":
     parser.add_argument('-mce', "--max_categ_eval", type=int, default=max_categ_e,
                         help="Maximum number of samples per category for evaluation.")
     parser.add_argument("--safe", action="store_true", help="Safely load images skipping the corrupted ones.")
-
+    parser.add_argument("--plot_embeddings", action="store_true", help="Plot prompt embeddings during training.")
 
     # Category file arguments
     parser.add_argument('--cat_prefix', type=str, default=categ_prefix,
@@ -141,7 +145,10 @@ if __name__ == "__main__":
                         default=raw, action="store_true")
     parser.add_argument('--zero_shot', action='store_true', default=zero_shot, help='Perform zero-shot prediction (no training).')
     parser.add_argument('--vis', action='store_true',default=visualize, help='Visualize model accuracy statistics.')
-
+    parser.add_argument('--one_2_one', action='store_true', default=one_2_one, help='Use one-to-one filename-prompt matching for training and evaluation.')
+    parser.add_argument('--prompt_path', type=str, default=prompt_path, help='Path to TSV file with filename-prompt mapping for one-to-one training/evaluation.')
+    parser.add_argument('--metadata_path', type=str, default=metadata_path, help='Path to category description templates with metadata placeholder for formatting.')
+    parser.add_argument('--ensemble', action='store_true', default=ensemble, help='Use ensemble of models for prediction (only for evaluation, not for training).')
     # Common arguments
     parser.add_argument('-tn', "--topn", type=int, default=top_N, help="Number of top result categories to consider.")
 
@@ -156,10 +163,9 @@ if __name__ == "__main__":
     parser.add_argument('-rev', "--revision", type=str, default=None, help="HuggingFace revision (e.g. `main`, `vN.0` or `vN.M`)")
     parser.add_argument("--hf", help="Use model and processor from the HuggingFace repository", default=HF, action="store_true")
     parser.add_argument("--raw", help="Output raw scores for each category", default=raw, action="store_true")
-
-
+    parser.add_argument('advanced_split', help="Use advanced split for creating train/test datasets (only for training, not for evaluation)", default=advanced_split, action="store_true")
     args = parser.parse_args()
-
+    #print(args.base)
     input_dir = Path(test_dir) if args.directory is None else Path(args.directory)
     Training, top_N, raw, safety, categ_file = args.train, args.topn, args.raw, args.safe, args.cat_csv
     model_path = args.model_path if args.model_path is not None else model_path
@@ -169,8 +175,10 @@ if __name__ == "__main__":
     else:
         if not any(link for link in revision_to_base_model if args.revision.startswith(link)):
             raise ValueError(f"Revision {args.revision} is not supported. Available revisions: {list(revision_to_base_model.keys())}")
-
+        print(args.model)
+        #print(base_model)
         base_model = revision_to_base_model[args.revision[:len(revision_to_base_model.keys().__iter__().__next__())]]
+        print(base_model)
         if args.model != base_model:
             print(f"Base model {args.base} does not match the revision {args.revision}. Using {base_model} instead.")
             args.model = base_model
@@ -194,12 +202,13 @@ if __name__ == "__main__":
         datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S"),
         ",".join(("{}={}".format(re.sub("(.)[^_]*_?", r"\1", k), v) for k, v in sorted(vars(args).items()) if v
                   is not None and k not in (
-                      "file", "directory", "dir", "eval", "train", "model_path", "model", "cat_prefix", "model_dir",
-                      "eval_dir", "vis", "raw", "safe", "cat_dir", "hf", "cat_csv", "file_format")))
+                      "file", "directory", "dir", "eval", "train", "model_path","prompt_path", "model", "cat_prefix", "model_dir",
+                      "eval_dir", "vis", "raw", "safe", "cat_dir", "hf", "cat_csv", "file_format","metadata_path")))
     ))
 
-    args.logdir += f"-{args.model.replace('/', '_')}" if args.model else ""
 
+    args.logdir += f"-{args.model.replace('/', '_')}" if args.model else ""
+    os.makedirs(args.logdir, exist_ok=True)
     print("Arguments:")
     for arg in vars(args):
         if getattr(args, arg) is not None and getattr(args, arg) != False:
@@ -217,7 +226,12 @@ if __name__ == "__main__":
                              categories_tsv=args.cat_csv, seed=seed, input_format=args.file_format,
                              output_dir=str(output_dir), categories_dir=cat_directory,
                              model_dir=str(model_path), cp_dir=str(cp_dir), model_revision=args.revision.replace('.', ''),
-                             cat_prefix=args.cat_prefix, avg=args.avg, zero_shot=args.zero_shot)
+                             cat_prefix=args.cat_prefix, avg=args.avg, zero_shot=args.zero_shot,
+                               one_2_one=args.one_2_one, prompt_path=args.prompt_path,
+                                 ensemble=args.ensemble,metadata_path=args.metadata_path,
+                                 plot_embeddings=args.plot_embeddings,
+                                 advanced_split=args.advanced_split
+                             )
 
     data_dir = config.get("TRAIN", "FOLDER_PAGES")
     data_dir_eval = config.get("EVAL", "FOLDER_PAGES")
@@ -243,8 +257,10 @@ if __name__ == "__main__":
             model_path = Path(cp_dir.parent / args.model_dir / model_name_local)
             local_revision = args.revision
         else:
+            #print(model_path)
             model_name_local = Path(model_path).stem
-            local_revision = args.model_path.split("_")[-1]
+            ## ChANGED BY SVEN BELOW!!
+            local_revision = str(model_path).split("_")[-1] #args.model_path.split("_")[-1]
 
         hf_model_name_local = f"model_{config.get('HF', 'revision').replace('.', '')}"
         hf_model_path = f"{config.get('OUTPUT', 'FOLDER_MODELS')}/{hf_model_name_local}"
@@ -267,7 +283,10 @@ if __name__ == "__main__":
 
 
         # loading from repo
-        clip_instance.load_from_hub(config.get("HF", "repo_name"), args.revision)
+        #
+        # clip_instance.load_from_hub(config.get("HF", "repo_name"), args.revision)
+        # CHANGED BY SVEN BELOW!!
+        clip_instance.load_from_hub(config.get("HF", "repo_name"), local_revision)
 
         clip_instance.save_model(hf_model_path)
 

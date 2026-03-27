@@ -4,3 +4,9 @@
 .idea
 /__pycache__/
 /__pycache__/*
+
+.venv
+models
+logs
+category_descriptions/prompts
+model_checkpoints

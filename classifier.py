@@ -2,11 +2,14 @@ import h5py
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
-
+#import torch
+#import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import ConfusionMatrixDisplay
+from sklearn.metrics import classification_report
 from sklearn.preprocessing import MinMaxScaler
-
+from riksarkivet_prompt_from_meta import tokenize_safe_single, create_prompt
 import torch
 import torch.utils.data
 from torch.utils.tensorboard import SummaryWriter
@@ -24,6 +27,17 @@ import string
 import torch.nn as nn
 
 from minor_classes import *
+from utils import main_class_report
+
+def collate_with_prompts(batch):
+    images = torch.stack([b[0] for b in batch])
+    classes = torch.tensor([b[1] for b in batch])
+    prompt_lists = [b[2] for b in batch]
+
+    flat_prompts = [p for lst in prompt_lists for p in lst]
+    counts = [len(lst) for lst in prompt_lists]
+
+    return images, classes, flat_prompts, counts
 
 
 class CLIP(nn.Module, PyTorchModelHubMixin):
@@ -50,7 +64,14 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                  cat_prefix: str = None,
                  safety_check: bool = True,
                  avg: bool = False,
-                 zero_shot: bool = False):
+                 zero_shot: bool = False,
+                 prompt_path: str | None = None,
+                 one_2_one: bool = False,
+                 ensemble: bool = False,
+                 metadata_path: str | None = None,
+                 plot_embeddings: bool = False,
+                 advanced_split: bool = False
+                 ):
         super().__init__()  # initialize nn.Module
         # all your existing init logic follows unchanged:
         self.upper_category_limit      = max_category_samples
@@ -60,12 +81,18 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         self.avg                       = avg
         self.device                    = device
         self.zero_shot                 = zero_shot
-
+        self.prompt_path               = prompt_path
+        self.one_2_one                 = one_2_one
         self.test_fraction = test_ratio
         self.file_format = input_format
         self.safe_load = safety_check
-
+        self.ensemble = ensemble
+        self.metadata_path = metadata_path
+        self.plot_embeddings = plot_embeddings
+        self.advanced_split = advanced_split
         print(f"Chosen file handling:\t{self.file_format} format \n\tSafety load of images:\t{self.safe_load}")
+        if self.one_2_one and self.ensemble:
+            raise ValueError("one_2_one and ensemble can't be True at the same time.")
 
         self.output_dir = Path(__file__).parent / "result" if output_dir is None else Path(output_dir)
         self.models_dir = Path(__file__).parent / "models" if model_dir is None else Path(model_dir)
@@ -102,6 +129,32 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             transforms.ToTensor(),
             transforms.Normalize(mean=image_mean, std=image_std)
         ])
+        if self.ensemble:
+            prompt_tsv = Path(self.prompt_path)
+            out_path = Path("category_descriptions") / "prompts"
+            if not prompt_tsv.exists():
+                print("No prompt file found for ensemble mode.")
+                print("Generating prompts using metadata and category templates...")
+                create_prompt(
+                    metadata_csv_path=metadata_path,
+                    category_tsv_path=categories_tsv,
+                    out_path = out_path
+                )
+            else:
+                print(f"Using existing prompt file: {prompt_tsv}")
+
+            # Load prompts per file
+            print("Loading prompts into memory...")
+            df = pd.read_csv(prompt_tsv, sep="\t")
+
+            self.prompts_by_file = (
+                df.groupby("filename")["prompt"]
+                .apply(list)
+                .to_dict()
+            )
+
+            print(f"Loaded prompts for {len(self.prompts_by_file)} files.")
+
 
         if self.avg:
             loaded_cats = load_categories(categories_tsv, prefix=cat_prefix, directory=categories_dir)
@@ -136,6 +189,16 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                     print(f"Category: {cat}, Descriptions:")
                     for desc in descs:
                         print(f"  - {desc}")
+        if self.one_2_one and self.prompt_path is not None:
+            df = pd.read_csv(self.prompt_path, sep="\t")
+
+            # filename → prompt
+            self.prompt_map = {
+                row["filename"]: row["prompt"]
+                for _, row in df.iterrows()
+            }
+
+            print(f"Loaded {len(self.prompt_map)} one-to-one prompts from {self.prompt_path}.")
 
         self.model_name = model_name
 
@@ -146,19 +209,85 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         self.categories_dir = categories_dir
         self.categories_tsv = categories_tsv
+        self.metadata_path  = metadata_path
+    def aggregate_prompts(self, prompts, strategy="mean"):
+        if len(prompts) == 0:
+            D = self.model.text_projection.shape[1]
+            return torch.zeros(D, device=self.device)
 
-    def _get_averaged_text_features(self):
+        tokens = clip.tokenize(prompts).to(self.device)
+
+        with torch.no_grad():
+            feats = self.model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+
+        if strategy == "mean":
+            out = feats.mean(dim=0)
+        else:
+            out, _ = feats.max(dim=0)
+
+        return out / out.norm()
+
+
+
+    def _get_averaged_text_features_old(self):
         """Computes averaged text features for each category."""
         all_features = []
         with torch.no_grad():
             for category in self.categories:
                 descriptions = [f"a scan of {desc}" for desc in self.texts[category]]
+                #print(descriptions)
                 tokens = torch.cat([clip.tokenize(desc) for desc in descriptions]).to(self.device)
                 features = self.model.encode_text(tokens)
                 features /= features.norm(dim=-1, keepdim=True)
                 mean_features = features.mean(dim=0)
                 mean_features /= mean_features.norm()
                 all_features.append(mean_features)
+        return torch.stack(all_features)
+
+    def _get_averaged_text_features(self):
+        """Computes averaged text features for each category and plots 1D heatmaps per prompt + mean."""
+        all_features = []
+
+        with torch.no_grad():
+            for category in self.categories:
+                descriptions = [f"a scan of {desc}" for desc in self.texts[category]]
+                tokens = torch.cat([clip.tokenize(desc) for desc in descriptions]).to(self.device)
+
+                # Encode prompts
+                features = self.model.encode_text(tokens)
+                features = features / features.norm(dim=-1, keepdim=True)
+
+                # Average embedding
+                mean_features = features.mean(dim=0)
+                mean_features = mean_features / mean_features.norm()
+
+                # --- SUBPLOTS: one per prompt + mean ---
+                num_prompts = features.shape[0]
+                total_plots = num_prompts + 1  # prompts + mean
+
+                fig, axes = plt.subplots(total_plots, 1, figsize=(10, 1.2 * total_plots), sharex=True)
+
+                for i in range(num_prompts):
+                    axes[i].imshow(features[i].unsqueeze(0).cpu().numpy(),
+                                aspect="auto", cmap="viridis")
+                    axes[i].set_ylabel(f"p{i}", rotation=0, labelpad=20)
+                    axes[i].set_yticks([])
+
+                # Mean embedding subplot
+                axes[-1].imshow(mean_features.unsqueeze(0).cpu().numpy(),
+                                aspect="auto", cmap="viridis")
+                axes[-1].set_ylabel("mean", rotation=0, labelpad=20)
+                axes[-1].set_yticks([])
+                os.makedirs(self.output_dir / "embeddings", exist_ok=True)
+                plt.suptitle(f"Embedding dimensions – {category}")
+                plt.xlabel("embedding dimension")
+                plt.tight_layout()
+                plt.savefig(self.output_dir / "embeddings" / f"{self.model_code_name}_{category}_embedding_heatmap.png")
+                # --- END SUBPLOTS ---
+
+                all_features.append(mean_features)
+
         return torch.stack(all_features)
 
     def train(self, train_dir: str, log_dir: str, eval_dir: str = None,
@@ -183,46 +312,71 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             self.model.float()
         else:
             clip.model.convert_weights(self.model)
-
+        
         writer = SummaryWriter(log_dir=log_dir)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-
+        prompt_path = self.prompt_path if (self.prompt_path is not None and (self.one_2_one or self.ensemble)) else None
         train_dataset = ImageFolderCustom(train_dir, model_name=self.model_code_name,
                                         max_category_samples=self.upper_category_limit,
+                                        prompt_path=prompt_path,
                                         preprocess_fn=self.preprocess, safety=self.safe_load,
                                         img_size=self.preprocess.transforms[0].size,
-                                        use_advanced_split=True,  # Enable new split
+                                        use_advanced_split=self.advanced_split,  # Enable new split
                                         split_type='train', seed=self.seed,
                                         file_format=self.file_format,
-                                        test_ratio=self.test_fraction)
+                                        test_ratio=self.test_fraction,
+                                        avg=self.avg,
+                                        one_2_one=self.one_2_one,
+                                        ensemble=self.ensemble)
 
         train_labels = torch.tensor(train_dataset.targets)
 
         num_unique_classes = len(set(train_dataset.targets))
         n_classes_for_sampler = min(batch_size, num_unique_classes)
 
+        if self.one_2_one and self.prompt_path is not None:
+            print(f"One-to-one prompting enabled. Changing batch size to match number of classes per batch: {n_classes_for_sampler}.")
+            batch_size = n_classes_for_sampler # Adjust batch size to match the number of classes sampled per batch for one-to-one prompting
         if n_classes_for_sampler < batch_size:
             print(f"Warning:\tOnly {num_unique_classes} unique classes found in the training dataset.")
             # This warning helps explain why the effective batch size might be smaller than configured.
             print(f"Warning:\tNumber of classes to be sampled per batch is reduced from {batch_size} to {n_classes_for_sampler}.")
-
         # Pass the capped value to the sampler
         # Since n_samples=1, the effective batch size will now be n_classes_for_sampler.
         train_sampler = CLIP_BalancedBatchSampler(train_labels, n_classes_for_sampler, 1)
 
         # train_sampler = CLIP_BalancedBatchSampler(train_labels, batch_size, 1)
-        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_sampler=train_sampler)
-
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_sampler=train_sampler,
+                                                       collate_fn=collate_with_prompts if not self.ensemble else None)
+        if self.plot_embeddings:
+            print("#####  Plotting prompt embeddings...  ######\n")
+            if self.avg:
+                self.plot_prompt_embeddings(train_dataloader, batch_idx=0)
+            self.plot_image_embeddings_2d(train_dataloader,train_labels, n_batches=100)
+            self.plot_image_embeddings_2d(train_dataloader,train_labels, n_batches=100, method="tsne")
         test_dataset = ImageFolderCustom(train_dir, model_name=self.model_code_name,
                                           max_category_samples=self.upper_category_limit,
+                                          prompt_path=prompt_path,
                                           preprocess_fn=self.preprocess, safety=self.safe_load,
                                           img_size=self.preprocess.transforms[0].size,
-                                          use_advanced_split=True,  # Enable new split
+                                          use_advanced_split=self.advanced_split,  # Enable new split
                                           split_type='val', seed=self.seed,
                                           file_format=self.file_format,
-                                          test_ratio=self.test_fraction)
+                                          test_ratio=self.test_fraction,
+                                          avg=self.avg,
+                                          one_2_one=self.one_2_one,
+                                          ensemble=self.ensemble)
+        if self.one_2_one and self.prompt_path is not None:
+            test_labels = torch.tensor(test_dataset.targets)
+            test_sampler = CLIP_BalancedBatchSampler(test_labels,n_classes_for_sampler, 1)
 
-        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size)
+            test_dataloader = torch.utils.data.DataLoader(
+                test_dataset,
+                batch_sampler=test_sampler
+            )
+        else:
+            test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size,
+                                                          collate_fn=collate_with_prompts if not self.ensemble else None)
 
         loss_img = torch.nn.CrossEntropyLoss()
         loss_txt = torch.nn.CrossEntropyLoss()
@@ -249,8 +403,11 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 step += 1
                 optimizer.zero_grad()
 
-                images, class_ids = batch
+                images, class_ids, prompts = batch
                 images = images.to(self.device)
+
+                #print("Batch example:", next(iter(train_dataloader)))
+                #exit()
 
                 if self.avg:
                     # Encode images
@@ -267,10 +424,40 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                     logits_per_image = logit_scale * image_features @ text_features.T.to(image_features.dtype)
                     logits_per_text = logits_per_image.T
 
+                elif self.ensemble:
+                    per_image_text_feats = []
+
+                    for prompt_list in prompts:   # prompts är list[list[str]]
+                        text_emb = self.aggregate_prompts(prompt_list, strategy="mean")
+                        per_image_text_feats.append(text_emb)
+
+                    text_features = torch.stack(per_image_text_feats).to(self.device)
+
+                    image_features = self.model.encode_image(images)
+                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+                    logit_scale = self.model.logit_scale.exp()
+                    logits_per_image = logit_scale * image_features @ text_features.T
+                    logits_per_text = logits_per_image.T
+
                 else:
-                    texts = [f"a scan of {self.texts[label_id]}" for label_id in class_ids]
-                    texts = clip.tokenize(texts).to(self.device)
+
+                    if self.one_2_one:
+                        # prompts är en lista med metadata‑prompter från datasetet
+                        #combined_prompts = [
+                        #    f"a scan of {self.texts[label_id]} {prompt}"
+                        #    for label_id, prompt in zip(class_ids, prompts)
+                        #]
+                        combined_prompts = prompts
+                        texts = clip.tokenize(combined_prompts).to(self.device)
+                    else:
+                        # originalbeteende
+                        texts = [f"a scan of {self.texts[label_id]}" for label_id in class_ids]
+                        texts = clip.tokenize(texts).to(self.device)
+
                     logits_per_image, logits_per_text = self.model(images, texts)
+
 
                 ground_truth = torch.arange(len(images), dtype=torch.long, device=self.device)
 
@@ -326,23 +513,58 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 text_features_eval = self.text_features  # Use the pre-computed clip set of averaged text features
                 text_features_eval = text_features_eval / text_features_eval.norm(dim=-1,
                                                                                   keepdim=True)  # Ensure normalized
+            elif self.ensemble:
+                text_features_eval = None   # vi beräknar per bild i loopen
+
             else:
-                # Original logic for non-averaged categories
-                all_texts = torch.cat([clip.tokenize(f"a scan of {c}") for c in self.texts]).to(self.device)
-                with torch.no_grad():
-                    text_features_eval = self.model.encode_text(all_texts)
-                    text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+                if self.one_2_one:
+                    text_features_eval = None   # vi beräknar textfeatures per batch
+                else:
+                    all_texts = torch.cat([clip.tokenize(f"a scan of {c}") for c in self.texts]).to(self.device)
+                    with torch.no_grad():
+                        text_features_eval = self.model.encode_text(all_texts)
+                        text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
 
             with torch.no_grad():
                 for batch in tqdm(test_dataloader, desc="Evaluating"):
-                    images, class_ids = batch
+                    images, class_ids, prompts = batch
                     images, class_ids = images.to(self.device), class_ids.to(self.device)
 
                     image_features = self.model.encode_image(images)
                     image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    if self.one_2_one:
+                        # Encode prompts per batch
+                        texts = clip.tokenize(prompts).to(self.device)
+                        text_features = self.model.encode_text(texts)
+                        text_features_eval = text_features / text_features.norm(dim=-1, keepdim=True)
+                        #similarity = (100.0 * (image_features * text_features_eval).sum(dim=-1, keepdim=True))
+                    elif self.ensemble:
+                        per_image_text_feats = []
 
-                    similarity = (100.0 * image_features @ text_features_eval.T)
+                        for prompt_list in prompts:   # prompts är list[list[str]]
+                            text_emb = self.aggregate_prompts(prompt_list, strategy="mean")
+                            per_image_text_feats.append(text_emb)
 
+                        text_features_eval = torch.stack(per_image_text_feats).to(self.device)
+                        text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+                    if self.ensemble:
+                        # använd klassernas medelvärdes-embeddings för klassificering
+                        class_text_feats = self.text_features.to(self.device)
+                        class_text_feats = class_text_feats / class_text_feats.norm(dim=-1, keepdim=True)
+
+                        similarity = (100.0 * image_features @ class_text_feats.T)
+
+
+                    else:
+                        similarity = (100.0 * image_features @ text_features_eval.T)
+                    #print("\n--- DEBUG SHAPES ---")
+                    #print("similarity.shape:", similarity.shape)
+                    #print("class_ids.shape:", class_ids.shape)
+                    #print("unique class_ids:", class_ids.unique())
+                    #print("num_classes (model):", self.num_classes)
+                    #print("one2one:", self.one_2_one)
+                    #print("---------------------\n")
                     acc_top1_metric.update(similarity, class_ids)
                     acc_top3_metric.update(similarity, class_ids)
 
@@ -382,14 +604,19 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         test_dataset = ImageFolderCustom(train_dir if eval_dir is None else eval_dir,
                                          model_name=self.model_code_name,
                                          max_category_samples=self.upper_category_limit,
+                                         prompt_path=prompt_path,
                                          preprocess_fn=self.preprocess,
                                          img_size=self.preprocess.transforms[0].size,
                                          use_advanced_split=(eval_dir is None),  # Enable new split
                                          split_type='test', seed=self.seed,
                                          file_format=self.file_format,
-                                         test_ratio=self.test_fraction)
+                                         test_ratio=self.test_fraction,
+                                        avg=self.avg,
+                                          one_2_one=self.one_2_one,
+                                          ensemble=self.ensemble)
 
-        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size)
+        test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size,
+                                                      collate_fn=collate_with_prompts if not self.ensemble else None)
 
         self.test(test_dataloader, image_files=test_dataset.paths)
 
@@ -408,11 +635,13 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 self.load_model(load_directory=model_path, revision=model_path.split("_")[-1] if "_" in model_path else "main")
 
         model_name = Path(model_path).stem if model_path is not None else self.model_code_name
-
+        prompt_path = self.prompt_path if (self.prompt_path is not None and (self.one_2_one or self.ensemble)) else None
         eval_dataset = ImageFolderCustom(eval_dir, max_category_samples=None,
+                                         prompt_path=prompt_path,
                                          preprocess_fn=self.preprocess, img_size=self.preprocess.transforms[0].size,
                                          file_format=self.file_format, use_advanced_split=False,
-                                         split_type='test', seed=self.seed, model_name=model_name)
+                                         split_type='test', seed=self.seed, model_name=model_name,
+                                         avg=self.avg, one_2_one=self.one_2_one, ensemble=self.ensemble)
         eval_dataloader = torch.utils.data.DataLoader(eval_dataset, batch_size=batch_size)
 
         print("Starting evaluation of the loaded model...")
@@ -488,12 +717,22 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 text_features_test /= text_features_test.norm(dim=-1, keepdim=True)
 
         with torch.no_grad():
-            for images, class_ids in tqdm(test_dataloader, desc="Testing"):
+            for images, class_ids, prompts in tqdm(test_dataloader, desc="Testing"):
                 images = images.to(self.device)
                 image_features = self.model.encode_image(images)
                 image_features /= image_features.norm(dim=-1, keepdim=True)
 
-                similarity = (100.0 * image_features @ text_features_test.T)
+                if self.one_2_one:
+
+                    texts = clip.tokenize(prompts).to(self.device)
+                    text_features = self.model.encode_text(texts)
+                    text_features /= text_features.norm(dim=-1, keepdim=True)
+
+                    similarity = 100.0 * (image_features * text_features).sum(dim=-1, keepdim=True)
+
+                else:
+
+                    similarity = (100.0 * image_features @ text_features_test.T)
 
                 all_pred_scores.append(similarity.cpu().numpy())
 
@@ -518,17 +757,27 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         plot_image = plot_path / f'{time_stamp}_{number_of_samples}{"_zero" if self.zero_shot else ""}_EVAL_TOP-{self.top_N}_{self.model_code_name}.png'
         table_file = table_path / f'{time_stamp}_{number_of_samples}{"_zero" if self.zero_shot else ""}_EVAL_TOP-{self.top_N}_{self.model_code_name}.csv'
-
+        plot_report= plot_path / f'{time_stamp}_{number_of_samples}{"_zero" if self.zero_shot else ""}_CLASSI_REPORT_TOP-{self.top_N}_{self.model_code_name}.png'
 
         if vis:
             # Ensure display labels match the order of predictions
             display_labels = self.categories if self.avg else test_dataloader.dataset.classes
-
+            num_classes = len(display_labels)
+            labels = list(range(num_classes))
+            report = classification_report(
+                    np.array(all_true_labels),
+                    np.array(all_predictions),
+                    labels=labels,
+                    target_names=display_labels,
+                    digits=3,
+                    zero_division=0)
+            main_class_report(report,plot_report)
             disp = ConfusionMatrixDisplay.from_predictions(
-                np.array(all_true_labels), np.array(all_predictions), cmap='inferno',
-                normalize="true", display_labels=np.array(display_labels)
+                np.array(all_true_labels), np.array(all_predictions),labels=labels,
+                  cmap='inferno',
+                #normalize="true",
+                  display_labels=np.array(display_labels)
             )
-
             tick_positions = disp.ax_.get_xticks()
             short_labels = [f"{label[0]}{label.split('_')[-1][0] if '_' in label else ''}" for label in disp.display_labels]
             disp.ax_.set_xticks(tick_positions)
@@ -1022,6 +1271,346 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             except Exception as e:
                 print(f"Warning: could not reload/sort final RAW file {raw_out_table}: {e}")
 
+    def plot_prompt_embeddings(self, dataloader, batch_idx=0, max_chars=300):
+        """
+        Plots CLIP text embeddings for prompts in a single batch.
+        Similar to _get_averaged_text_features(), but for per-image prompts.
+        """
+
+        import matplotlib.pyplot as plt
+        import os
+        from itertools import islice
+
+        # Hämta en batch
+        batch = next(islice(dataloader, batch_idx, None))
+        images, class_ids, prompts = batch
+
+        # Trunka långa prompts (CLIP max 77 tokens)
+        prompts = [p[:max_chars] for p in prompts]
+
+        # Tokenisera
+        tokens = clip.tokenize(prompts).to(self.device)
+
+        with torch.no_grad():
+            text_features = self.model.encode_text(tokens)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+        # Medelvärde
+        mean_features = text_features.mean(dim=0)
+        mean_features = mean_features / mean_features.norm()
+
+        # --- PLOTTING ---
+        num_prompts = text_features.shape[0]
+        total_plots = num_prompts + 1
+
+        fig, axes = plt.subplots(total_plots, 1, figsize=(10, 1.2 * total_plots), sharex=True)
+
+        for i in range(num_prompts):
+            axes[i].imshow(text_features[i].unsqueeze(0).cpu().numpy(),
+                        aspect="auto", cmap="viridis")
+            axes[i].set_ylabel(f"p{i}", rotation=0, labelpad=20)
+            axes[i].set_yticks([])
+
+        axes[-1].imshow(mean_features.unsqueeze(0).cpu().numpy(),
+                        aspect="auto", cmap="viridis")
+        axes[-1].set_ylabel("mean", rotation=0, labelpad=20)
+        axes[-1].set_yticks([])
+
+        plt.suptitle("Prompt embedding dimensions (batch {})".format(batch_idx))
+        plt.xlabel("embedding dimension")
+        plt.tight_layout()
+
+        outdir = self.output_dir / "prompt_embeddings"
+        os.makedirs(outdir, exist_ok=True)
+        plt.savefig(outdir / f"{self.model_code_name}_batch{batch_idx}_prompt_embeddings.png")
+
+        print(f"Saved prompt embedding plot for batch {batch_idx} → {outdir}")
+
+    def plot_image_embeddings_2d_old(self, dataloader, labels, n_batches=100, method="pca"):
+        """
+        Collects embeddings from multiple batches and plots them in 2D.
+        """
+
+        #import matplotlib.pyplot as plt
+        #import seaborn as sns
+        from sklearn.decomposition import PCA
+        from sklearn.manifold import TSNE
+        #import numpy as np
+        #import os
+
+        all_feats = []
+        all_classes = []
+
+        # --- 1. Hämta flera batchar ---
+        for i, batch in enumerate(dataloader):
+            if i >= n_batches:
+                break
+
+            images, class_ids, prompts = batch
+
+            with torch.no_grad():
+                feats = self.model.encode_image(images.to(self.device))
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+                all_feats.append(feats.cpu().numpy())
+                all_classes.append(class_ids.cpu().numpy())
+
+        # --- 2. Slå ihop allt ---
+        all_feats = np.concatenate(all_feats, axis=0)
+        all_classes = np.concatenate(all_classes, axis=0)
+
+        # --- 3. Reducera dimensioner ---
+        if method.lower() == "pca":
+            reducer = PCA(n_components=2)
+            reduced = reducer.fit_transform(all_feats)
+
+        elif method.lower() == "tsne":
+            # auto-perplexity baserat på antal samples
+            n_samples = all_feats.shape[0]
+            perp = max(2, min(30, n_samples // 3))
+            reducer = TSNE(
+                n_components=2,
+                perplexity=perp,
+                learning_rate="auto",
+                init="random"
+            )
+            reduced = reducer.fit_transform(all_feats)
+
+        else:
+            raise ValueError("method must be 'pca' or 'tsne'")
+
+        # --- 4. Plot ---
+        outdir = self.output_dir / "image_embeddings_2d"
+        os.makedirs(outdir, exist_ok=True)
+
+        plt.figure(figsize=(10, 8))
+        sns.scatterplot(
+            x=reduced[:, 0],
+            y=reduced[:, 1],
+            hue=all_classes,
+            palette="tab10",
+            s=50,
+            edgecolor="black"
+        )
+
+        plt.title(f"2D Image Embeddings ({method.upper()}) — {n_batches} batches")
+        plt.xlabel("Component 1")
+        plt.ylabel("Component 2")
+        plt.legend(title="Class ID", bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
+
+        outfile = outdir / f"{self.model_code_name}_{method}_{n_batches}batches.png"
+        plt.savefig(outfile)
+
+        print(f"Saved 2D image embedding plot → {outfile}")
+
+    def plot_image_embeddings_2d(self, dataloader, labels=None, n_batches=100, method="pca"):
+        """
+        Collect embeddings from multiple batches and produce two 2D plots:
+        - image embeddings (image_feats)
+        - text embeddings (text_feats from prompts)
+        Saves PNGs to self.output_dir / "image_embeddings_2d".
+        """
+        import os
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from sklearn.decomposition import PCA
+        from sklearn.manifold import TSNE
+        import torch
+
+        device = getattr(self, "device", "cpu")
+
+        all_image_feats = []
+        all_text_feats = []
+        all_classes = []
+        sample_prompts = []
+
+        # --- 1. Hämta flera batchar ---
+        for i, batch in enumerate(dataloader):
+            if i >= n_batches:
+                break
+
+            # Antag batch = (images, class_ids, prompts)
+            images, class_ids, prompts = batch
+
+            # Image embeddings
+            with torch.no_grad():
+                img_feats = self.model.encode_image(images.to(device))
+                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+                all_image_feats.append(img_feats.cpu().numpy())
+
+            # Text embeddings: prompts kan vara list/tuple av strings
+            # Tokenisera/encode per batch; om prompts redan tokeniserade, anpassa här
+            try:
+                # clip.tokenize if you used raw text; here we assume model.encode_text accepts tokenized input
+                # If your model.encode_text expects token ids, replace below with appropriate tokenization.
+                text_tokens = clip.tokenize(list(prompts)).to(device)
+                with torch.no_grad():
+                    txt_feats = self.model.encode_text(text_tokens)
+                    txt_feats = txt_feats / txt_feats.norm(dim=-1, keepdim=True)
+                    all_text_feats.append(txt_feats.cpu().numpy())
+            except Exception:
+                # Fallback: if prompts are already token tensors or encode_text accepts raw strings
+                try:
+                    with torch.no_grad():
+                        txt_feats = self.model.encode_text(prompts)  # if encode_text handles list[str]
+                        txt_feats = txt_feats / txt_feats.norm(dim=-1, keepdim=True)
+                        all_text_feats.append(txt_feats.cpu().numpy())
+                except Exception:
+                    # If text encoding fails, skip this batch's text embeddings but keep images
+                    all_text_feats.append(np.zeros((len(prompts), self.model.visual.output_dim)))  # placeholder
+
+            all_classes.append(class_ids.cpu().numpy())
+            sample_prompts.extend(list(prompts))
+
+        if len(all_image_feats) == 0:
+            print("No image features collected.")
+            return
+
+        # --- 2. Slå ihop allt ---
+        all_image_feats = np.concatenate(all_image_feats, axis=0)
+        all_classes = np.concatenate(all_classes, axis=0)
+        try:
+            all_text_feats = np.concatenate(all_text_feats, axis=0)
+        except Exception:
+            all_text_feats = None
+
+        outdir = Path(self.output_dir) / "image_embeddings_2d"
+        os.makedirs(outdir, exist_ok=True)
+
+        def reduce_and_plot(feats, classes, title_suffix, fname_suffix):
+            n_samples = feats.shape[0]
+            if n_samples < 2:
+                print(f"Not enough samples for {title_suffix} (n={n_samples}). Skipping.")
+                return
+
+            if method.lower() == "pca" or n_samples < 10:
+                reducer = PCA(n_components=2)
+                reduced = reducer.fit_transform(feats)
+            elif method.lower() == "tsne":
+                perp = max(2, min(30, max(2, n_samples // 3)))
+                reducer = TSNE(n_components=2, perplexity=perp, learning_rate="auto", init="random")
+                reduced = reducer.fit_transform(feats)
+            else:
+                raise ValueError("method must be 'pca' or 'tsne'")
+
+            plt.figure(figsize=(10, 8))
+            sns.scatterplot(x=reduced[:, 0], y=reduced[:, 1], hue=classes, palette="tab10", s=50, edgecolor="black", legend="full")
+            plt.title(f"{title_suffix} ({method.upper()}) — {n_samples} samples")
+            plt.xlabel("Component 1")
+            plt.ylabel("Component 2")
+            plt.legend(title="Class ID", bbox_to_anchor=(1.05, 1), loc="upper left")
+            plt.tight_layout()
+            outfile = outdir / f"{self.model_code_name}_{fname_suffix}_{method}_{n_batches}batches.png"
+            plt.savefig(outfile)
+            plt.close()
+            print(f"Saved {title_suffix} plot → {outfile}")
+
+        # --- 3. Plot image embeddings ---
+        reduce_and_plot(all_image_feats, all_classes, "Image Embeddings", "image_embeddings")
+
+        # --- 4. Plot text embeddings (if available) ---
+        if all_text_feats is not None and all_text_feats.shape[0] == all_image_feats.shape[0]:
+            reduce_and_plot(all_text_feats, all_classes, "Text (Prompt) Embeddings", "text_embeddings")
+        elif all_text_feats is not None:
+            # If text and image counts differ, plot text separately with its own class mapping if possible
+            text_classes = all_classes[: all_text_feats.shape[0]] if all_text_feats.shape[0] <= all_classes.shape[0] else np.arange(all_text_feats.shape[0])
+            reduce_and_plot(all_text_feats, text_classes, "Text (Prompt) Embeddings", "text_embeddings")
+        else:
+            print("No text embeddings available to plot.")
+
+    def build_image_index(self, dataloader):
+        """Extrahera och spara normaliserade image embeddings och fil‑ids."""
+        self.all_image_feats = []
+        self.all_image_ids = []
+        self.model.eval()
+        with torch.no_grad():
+            for images, class_ids, meta in dataloader:
+                feats = self.model.encode_image(images.to(self.device))
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+                self.all_image_feats.append(feats.cpu())
+                # anta meta innehåller filename eller id
+                self.all_image_ids.extend([m if isinstance(m, str) else m['local_filename'] for m in meta])
+        self.all_image_feats = torch.cat(self.all_image_feats, dim=0)  # (N, D)
+
+    def search_by_image(self, query_image, k=10):
+        """Returnera top-k liknande bilder (filnamn + score)."""
+        self.model.eval()
+        with torch.no_grad():
+            q = self.model.encode_image(self.preprocess(query_image).unsqueeze(0).to(self.device))
+            q = q / q.norm(dim=-1, keepdim=True)
+            sims = (q @ self.all_image_feats.T).squeeze(0)  # (N,)
+            topk = sims.topk(k)
+            return [(self.all_image_ids[i], float(sims[i])) for i in topk.indices.tolist()]
+
+    def search_by_text(self, prompt, k=10):
+        """Tokenisera prompt, enkoda och returnera top-k bilder."""
+        self.model.eval()
+        with torch.no_grad():
+            tokens = clip.tokenize([prompt]).to(self.device)
+            t = self.model.encode_text(tokens)
+            t = t / t.norm(dim=-1, keepdim=True)
+            sims = (t @ self.all_image_feats.T).squeeze(0)
+            topk = sims.topk(k)
+            return [(self.all_image_ids[i], float(sims[i])) for i in topk.indices.tolist()]
+
+    def build_text_index(self, prompts_list):
+        """Skapa och spara text‑embeddings för alla prompts (lista av str)."""
+        self.all_prompts = prompts_list
+        self.all_text_feats = []
+        self.model.eval()
+        batch = []
+        B = 128
+        for i, p in enumerate(prompts_list):
+            batch.append(p)
+            if len(batch) == B or i == len(prompts_list)-1:
+                tokens = clip.tokenize(batch).to(self.device)
+                with torch.no_grad():
+                    tf = self.model.encode_text(tokens)
+                    tf = tf / tf.norm(dim=-1, keepdim=True)
+                    self.all_text_feats.append(tf.cpu())
+                batch = []
+        self.all_text_feats = torch.cat(self.all_text_feats, dim=0)  # (M, D)
+
+    def retrieve_prompts_for_image(self, image, k=5):
+        """Givet en bild, returnera topp‑k prompts (text) som matchar bäst."""
+        self.model.eval()
+        with torch.no_grad():
+            q = self.model.encode_image(self.preprocess(image).unsqueeze(0).to(self.device))
+            q = q / q.norm(dim=-1, keepdim=True)
+            sims = (q @ self.all_text_feats.T).squeeze(0)
+            topk = sims.topk(k)
+            return [(self.all_prompts[i], float(sims[i])) for i in topk.indices.tolist()]
+
+def cluster_dataset(self, dataloader, n_clusters=20, reduce_dim=50):
+    """Extrahera alla image embeddings, reducera med PCA och kör KMeans eller HDBSCAN."""
+    import numpy as np
+    from sklearn.decomposition import PCA
+    from sklearn.cluster import KMeans
+
+    # extrahera
+    feats = []
+    ids = []
+    self.model.eval()
+    with torch.no_grad():
+        for images, class_ids, meta in dataloader:
+            f = self.model.encode_image(images.to(self.device))
+            f = f / f.norm(dim=-1, keepdim=True)
+            feats.append(f.cpu().numpy())
+            ids.extend([m if isinstance(m, str) else m['local_filename'] for m in meta])
+    feats = np.concatenate(feats, axis=0)  # (N, D)
+
+    # reducera
+    pca = PCA(n_components=reduce_dim)
+    reduced = pca.fit_transform(feats)
+
+    # klustra
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42).fit(reduced)
+    labels = kmeans.labels_
+
+    # returnera mapping id -> cluster
+    return dict(zip(ids, labels)), reduced, labels
+
 
 def split_data_80_10_10(files: list, labels: list, random_seed: int, max_categ: int,
                         safe_check: bool = True):
@@ -1144,5 +1733,7 @@ def split_data_80_10_10(files: list, labels: list, random_seed: int, max_categ: 
     train_labels = labels[train_indices]
 
     return train_files, val_files, test_files, train_labels, val_labels, test_labels
+
+    
 
 
