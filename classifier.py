@@ -35,9 +35,9 @@ def collate_with_prompts(batch):
     prompt_lists = [b[2] for b in batch]
 
     flat_prompts = [p for lst in prompt_lists for p in lst]
-    counts = [len(lst) for lst in prompt_lists]
+    #counts = [len(lst) for lst in prompt_lists]
 
-    return images, classes, flat_prompts, counts
+    return images, classes, flat_prompts
 
 
 class CLIP(nn.Module, PyTorchModelHubMixin):
@@ -180,6 +180,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 self.texts = [desc for label, desc in loaded_cats]
                 self.text_inputs = torch.cat([clip.tokenize(f"a scan of {description}") for description in self.texts]).to(
                         device)
+                
             print(f"Categories: {self.categories} with single description per category.")
             if isinstance(self.texts, list):
                 for cat, desc in zip(self.categories, self.texts):
@@ -347,7 +348,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         # train_sampler = CLIP_BalancedBatchSampler(train_labels, batch_size, 1)
         train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_sampler=train_sampler,
-                                                       collate_fn=collate_with_prompts if not self.ensemble else None)
+                                                       collate_fn=collate_with_prompts if self.ensemble else None)
         if self.plot_embeddings:
             print("#####  Plotting prompt embeddings...  ######\n")
             if self.avg:
@@ -376,7 +377,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             )
         else:
             test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size,
-                                                          collate_fn=collate_with_prompts if not self.ensemble else None)
+                                                          collate_fn=collate_with_prompts if self.ensemble else None)
 
         loss_img = torch.nn.CrossEntropyLoss()
         loss_txt = torch.nn.CrossEntropyLoss()
@@ -616,7 +617,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                                           ensemble=self.ensemble)
 
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size,
-                                                      collate_fn=collate_with_prompts if not self.ensemble else None)
+                                                      collate_fn=collate_with_prompts if self.ensemble else None)
 
         self.test(test_dataloader, image_files=test_dataset.paths)
 
@@ -1271,6 +1272,45 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             except Exception as e:
                 print(f"Warning: could not reload/sort final RAW file {raw_out_table}: {e}")
 
+    def load_dataset(self, train_dir: str, batch_size: int) -> torch.utils.data.DataLoader:
+        """Loads the dataset from the specified directory and returns a DataLoader with a balanced batch sampler.
+        The dataset is expected to be organized in subdirectories for each class, compatible with ImageFolder"""
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = self.prompt_path if (self.prompt_path is not None and (self.one_2_one or self.ensemble)) else None
+        train_dataset = ImageFolderCustom(train_dir, model_name=self.model_code_name,
+                                        max_category_samples=self.upper_category_limit,
+                                        prompt_path=prompt_path,
+                                        preprocess_fn=self.preprocess, safety=self.safe_load,
+                                        img_size=self.preprocess.transforms[0].size,
+                                        use_advanced_split=self.advanced_split,  # Enable new split
+                                        split_type='test', seed=self.seed,
+                                        file_format=self.file_format,
+                                        test_ratio=self.test_fraction,
+                                        avg=self.avg,
+                                        one_2_one=self.one_2_one,
+                                        ensemble=self.ensemble)
+
+        train_labels = torch.tensor(train_dataset.targets)
+
+
+        num_unique_classes = len(set(train_dataset.targets))
+        n_classes_for_sampler = min(batch_size, num_unique_classes)
+
+        if self.one_2_one and self.prompt_path is not None:
+            print(f"One-to-one prompting enabled. Changing batch size to match number of classes per batch: {n_classes_for_sampler}.")
+            batch_size = n_classes_for_sampler # Adjust batch size to match the number of classes sampled per batch for one-to-one prompting
+        if n_classes_for_sampler < batch_size:
+            print(f"Warning:\tOnly {num_unique_classes} unique classes found in the training dataset.")
+            # This warning helps explain why the effective batch size might be smaller than configured.
+            print(f"Warning:\tNumber of classes to be sampled per batch is reduced from {batch_size} to {n_classes_for_sampler}.")
+        # Pass the capped value to the sampler
+        # Since n_samples=1, the effective batch size will now be n_classes_for_sampler.
+        train_sampler = CLIP_BalancedBatchSampler(train_labels, n_classes_for_sampler, 1)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_sampler=train_sampler,
+                                                    collate_fn=collate_with_prompts if self.ensemble else None)
+        
+        return train_dataset,train_dataloader
+
     def plot_prompt_embeddings(self, dataloader, batch_idx=0, max_chars=300):
         """
         Plots CLIP text embeddings for prompts in a single batch.
@@ -1420,6 +1460,13 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         device = getattr(self, "device", "cpu")
 
+
+        plot_path = Path(f'{self.output_dir}/plots')
+        table_path = Path(f'{self.output_dir}/tables')
+        plot_path.mkdir(parents=True, exist_ok=True)
+        time_stamp = time.strftime("%Y%m%d-%H%M")
+
+
         all_image_feats = []
         all_text_feats = []
         all_classes = []
@@ -1520,7 +1567,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             print("No text embeddings available to plot.")
 
     def build_image_index(self, dataloader):
-        """Extrahera och spara normaliserade image embeddings och fil‑ids."""
+        """Extract image features for full dataset and store them for fast retrieval. Also keep track of image IDs."""
         self.all_image_feats = []
         self.all_image_ids = []
         self.model.eval()
@@ -1534,7 +1581,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         self.all_image_feats = torch.cat(self.all_image_feats, dim=0)  # (N, D)
 
     def search_by_image(self, query_image, k=10):
-        """Returnera top-k liknande bilder (filnamn + score)."""
+        """Return top-k most similar images from the indexed dataset given a query image."""
         self.model.eval()
         with torch.no_grad():
             q = self.model.encode_image(self.preprocess(query_image).unsqueeze(0).to(self.device))
@@ -1582,35 +1629,112 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             topk = sims.topk(k)
             return [(self.all_prompts[i], float(sims[i])) for i in topk.indices.tolist()]
 
-def cluster_dataset(self, dataloader, n_clusters=20, reduce_dim=50):
-    """Extrahera alla image embeddings, reducera med PCA och kör KMeans eller HDBSCAN."""
-    import numpy as np
-    from sklearn.decomposition import PCA
-    from sklearn.cluster import KMeans
+    def cluster_dataset(self,dataset, dataloader:torch.utils.data.DataLoader
+                        , n_clusters=20, reduce_dim=50,cluster_by_num_classes=True,
+                          csv_out="cluster_results.csv"):
+        """
+        Extract image features, reduce dimension with PCA, cluster with KMeans,
+        plot the reduced features, and save results to CSV including categories.
+        """
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from sklearn.decomposition import PCA
+        from sklearn.cluster import KMeans
+        import torch
 
-    # extrahera
-    feats = []
-    ids = []
-    self.model.eval()
-    with torch.no_grad():
-        for images, class_ids, meta in dataloader:
-            f = self.model.encode_image(images.to(self.device))
-            f = f / f.norm(dim=-1, keepdim=True)
-            feats.append(f.cpu().numpy())
-            ids.extend([m if isinstance(m, str) else m['local_filename'] for m in meta])
-    feats = np.concatenate(feats, axis=0)  # (N, D)
+        if cluster_by_num_classes:
+            n_clusters = len(self.categories)
 
-    # reducera
-    pca = PCA(n_components=reduce_dim)
-    reduced = pca.fit_transform(feats)
+        feats = []
+        filenames = []
+        categories = []
 
-    # klustra
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42).fit(reduced)
-    labels = kmeans.labels_
+        plot_path = Path(f'{self.output_dir}/plots')
+        table_path = Path(f'{self.output_dir}/tables')
+        plot_path.mkdir(parents=True, exist_ok=True)
+        time_stamp = time.strftime("%Y%m%d-%H%M")
 
-    # returnera mapping id -> cluster
-    return dict(zip(ids, labels)), reduced, labels
+        print("Images loaded for clustering:", len(dataset))
 
+        print("********* Clustering dataset... *********\n")
+        print(f"Number of clustering classes: {n_clusters}")
+        print("\nImages loaded for clustering:", len(dataset))
+        self.model.eval()
+
+        all_paths = dataset.paths
+        global_idx = 0
+
+        with torch.no_grad():
+            for images, class_ids, meta in tqdm(dataloader, desc="Extracting CLIP features"):
+                f = self.model.encode_image(images.to(self.device))
+                f = f / f.norm(dim=-1, keepdim=True)
+                feats.append(f.cpu().numpy())
+
+                batch_size = images.size(0)
+                batch_paths = all_paths[global_idx : global_idx + batch_size]
+                filenames.extend(batch_paths)
+                global_idx += batch_size
+
+                for cid in class_ids:
+                    categories.append(self.categories[int(cid)])
+
+
+
+        feats = np.concatenate(feats, axis=0)
+
+        pca = PCA(n_components=reduce_dim)
+        reduced = pca.fit_transform(feats)
+
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        labels = kmeans.fit_predict(reduced)
+
+        if reduce_dim >= 2:
+            plt.figure(figsize=(10, 8))
+            plt.scatter(reduced[:, 0], reduced[:, 1], c=labels, cmap="tab20", s=12)
+            plt.title(f"PCA (2D) – {n_clusters} clusters")
+            plt.xlabel("PC1")
+            plt.ylabel("PC2")
+            plt.tight_layout()
+            #plt.show()
+
+        plot_image = plot_path / f'{time_stamp}_{"_zero" if self.zero_shot else ""}_CLUSTER_PLOT_TOP-{self.top_N}_{self.model_code_name}.png'
+        table_file = table_path / f'{time_stamp}_{"_zero" if self.zero_shot else ""}_CLUSTER_TABLE_TOP-{self.top_N}_{self.model_code_name}.csv'
+        #plot_report= plot_path / f'{time_stamp}_{"_zero" if self.zero_shot else ""}_CLUSTER_REPORT_TOP-{self.top_N}_{self.model_code_name}.png'
+        plt.savefig(plot_image)
+        print(f"Saved cluster plot to: {plot_image}")
+        df = pd.DataFrame({
+            "filename": filenames,
+            "cluster": labels,
+            "category": categories
+        })
+
+        # add PCA coordinates
+        for i in range(reduce_dim):
+            df[f"pc{i+1}"] = reduced[:, i]
+
+        df.to_csv(table_file, index=False)
+        print(f"Saved clustering results to: {table_file}")
+
+        # -----------------------------
+        # 6. Return mapping: filename → (cluster, category)
+        # -----------------------------
+        mapping = {
+            fn: {"cluster": cl, "category": cat}
+            for fn, cl, cat in zip(filenames, labels, categories)
+        }
+        if cluster_by_num_classes:
+            df_compare = pd.DataFrame({
+                    "filename": filenames,
+                    "true_label": categories,
+                    "cluster": labels
+                })
+
+            print("\nCluster vs True Label:")
+            print(pd.crosstab(df_compare["true_label"], df_compare["cluster"]))
+
+
+        return mapping, reduced, labels
 
 def split_data_80_10_10(files: list, labels: list, random_seed: int, max_categ: int,
                         safe_check: bool = True):

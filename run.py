@@ -120,7 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--dir", help="Predict a whole directory of images recursively.", action="store_true")
     parser.add_argument('-m', "--model", type=str, default=base_model,
                         help="CLIP model name to use. Default is ViT-B/32.")
-
+    parser.add_argument("--cluster", action="store_true", help="Cluster the dataset using the trained model's embeddings.")
     # Training arguments
     parser.add_argument("--train", action="store_true", help="Run model fine-tuning.")
     parser.add_argument('--epochs', type=int, default=epochs, help='Number of training epochs.')
@@ -163,7 +163,7 @@ if __name__ == "__main__":
     parser.add_argument('-rev', "--revision", type=str, default=None, help="HuggingFace revision (e.g. `main`, `vN.0` or `vN.M`)")
     parser.add_argument("--hf", help="Use model and processor from the HuggingFace repository", default=HF, action="store_true")
     parser.add_argument("--raw", help="Output raw scores for each category", default=raw, action="store_true")
-    parser.add_argument('advanced_split', help="Use advanced split for creating train/test datasets (only for training, not for evaluation)", default=advanced_split, action="store_true")
+    parser.add_argument('--advanced_split', help="Use advanced split for creating train/test datasets (only for training, not for evaluation)", default=advanced_split, action="store_true")
     args = parser.parse_args()
     #print(args.base)
     input_dir = Path(test_dir) if args.directory is None else Path(args.directory)
@@ -219,6 +219,7 @@ if __name__ == "__main__":
     output_dir.mkdir(exist_ok=True)
 
     cat_directory = str(cur / args.cat_dir)
+    print("SplIT",args.advanced_split)
     if not args.vis and not args.best and not args.eval_dir:
         clip_instance = CLIP(max_category_samples=args.max_categ, test_ratio=test_size,
                              eval_max_category_samples=args.max_categ_eval,
@@ -320,7 +321,13 @@ if __name__ == "__main__":
         else:
             visualize_results(str(csv), str(output_dir / 'stats'), args.zero_shot)
 
-
+    if args.cluster:
+        if not os.path.isdir(data_dir_eval):
+            print(f"Warning: Evaluation directory not found at: {data_dir_eval}. Using training directory for evaluation.")
+            data_dir_eval = data_dir
+        dataset, dataloader = clip_instance.load_dataset(data_dir_eval,batch_size=args.batch_size)
+        clip_instance.cluster_dataset(dataset, dataloader)
+        
     if args.eval:
         if args.zero_shot:
             model_path_str = None

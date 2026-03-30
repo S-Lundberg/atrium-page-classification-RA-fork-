@@ -144,7 +144,8 @@ class ImageFolderCustom(torch.utils.data.Dataset):
         # Apply splitting strategy
         if self.use_advanced_split:
             from classifier import CLIP, split_data_80_10_10
-
+            print(f"{self.use_advanced_split}")
+            print("\n\n\n")
             print(f"\tadvanced split_data_80_10_10 for\t{split_type}\tset")
 
             max_categ_str = f"{self.max_category_samples}c" if self.max_category_samples else "full"
@@ -253,34 +254,30 @@ class ImageFolderCustom(torch.utils.data.Dataset):
             label_name = self.classes[class_idx]
             prompts = self.prompts_by_file.get(filename, [])
 
-            if not prompts:
-                prompts = ["EMPTY PROMPT"]  # Fallback if no prompt found for the file
-
-            # 2. Om prompts är en sträng → gör det till lista
+            # Normalize prompts to always be a list
             if isinstance(prompts, str):
                 prompts = [prompts]
 
-            # 3. Om prompts är tom lista → fallback
-            if len(prompts) == 0:
+            if not prompts:
                 prompts = ["EMPTY PROMPT"]
 
+            # --- ALWAYS RETURN A LIST ---
             if self.ensemble:
-                # Return list of prompts
                 return img, class_idx, prompts
 
             elif self.one_2_one:
-                # Return a single prompt
-                return img, class_idx, prompts[0] if prompts else ""
+                return img, class_idx, [prompts[0]]
 
             else:
-                # avg mode: no prompts used
-                return img, class_idx, ""
+                # avg mode: still return a list for consistency
+                return img, class_idx, [""]
 
         except OSError as e:
             print(f"Skipping image at path {self.paths[index]} due to error: {e}")
             dummy_image = torch.zeros(3, self.size, self.size)
             dummy_label = 0
-            return dummy_image, dummy_label, "" if not self.ensemble else [""]
+            return dummy_image, dummy_label, [""]
+
 
 
 # Added from few_shot_finetuning.py for balanced sampling during training

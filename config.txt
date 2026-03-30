@@ -36,14 +36,15 @@ visualize = False
 description_folder = ./category_descriptions
 categories_prefix = page_categories
 one2one = False
-ensemble = True
+ensemble = False
 metadata_path = C:\\RA-CLIP\\Dataset_03_24\trying_images.csv
 model_storage = C:\\ufal\\atrium-page-classification
 
 [INPUT]
 FOLDER_INPUT=C:\\RA-CLIP\\test_set
 chunk_size = 1000
-advanced_split = True
+advanced_split = False
+
 [HF]
 repo_name = ufal/clip-historical-page
 token = hf_qViUKX....ixyJpjstNxGO
