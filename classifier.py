@@ -1443,7 +1443,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         print(f"Saved 2D image embedding plot → {outfile}")
 
-    def plot_image_embeddings_2d(self, dataloader, labels=None, n_batches=100, method="pca"):
+    def plot_image_embeddings_2d(self, dataloader, labels=None, n_batches=30, method="pca"):
         """
         Collect embeddings from multiple batches and produce two 2D plots:
         - image embeddings (image_feats)
@@ -1514,7 +1514,6 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             print("No image features collected.")
             return
 
-        # --- 2. Slå ihop allt ---
         all_image_feats = np.concatenate(all_image_feats, axis=0)
         all_classes = np.concatenate(all_classes, axis=0)
         try:
@@ -1544,8 +1543,8 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             plt.figure(figsize=(10, 8))
             sns.scatterplot(x=reduced[:, 0], y=reduced[:, 1], hue=classes, palette="tab10", s=50, edgecolor="black", legend="full")
             plt.title(f"{title_suffix} ({method.upper()}) — {n_samples} samples")
-            plt.xlabel("Component 1")
-            plt.ylabel("Component 2")
+            plt.xlabel("PCA 1")
+            plt.ylabel("PCA 2")
             plt.legend(title="Class ID", bbox_to_anchor=(1.05, 1), loc="upper left")
             plt.tight_layout()
             outfile = outdir / f"{self.model_code_name}_{fname_suffix}_{method}_{n_batches}batches.png"
@@ -1566,29 +1565,85 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         else:
             print("No text embeddings available to plot.")
 
-    def build_image_index(self, dataloader):
-        """Extract image features for full dataset and store them for fast retrieval. Also keep track of image IDs."""
+    def build_image_index(self, dataset, dataloader, index_path=""):
+        """
+        Extract CLIP image features for the entire dataset and store them on CPU.
+        If a saved index already exists, load it instead of recomputing.
+        """
+        index_path = os.path.join(os.path.dirname(index_path), "image_index.pt")
+        # Load existing index if available
+        if os.path.exists(index_path):
+            data = torch.load(index_path,weights_only=False)
+            self.all_image_feats = data["feats"]          # stays on CPU
+            self.all_image_ids = data["paths"]
+            print(f"Loaded {len(self.all_image_ids)} indexed images from {index_path}")
+            return
+
         self.all_image_feats = []
         self.all_image_ids = []
+
         self.model.eval()
+        all_paths = dataset.paths
+        global_idx = 0
+
         with torch.no_grad():
-            for images, class_ids, meta in dataloader:
+            for images, class_ids, meta in tqdm(dataloader, desc="Generating image features for indexing"):
+                # Encode on GPU
                 feats = self.model.encode_image(images.to(self.device))
                 feats = feats / feats.norm(dim=-1, keepdim=True)
+
+                # Store on CPU
                 self.all_image_feats.append(feats.cpu())
-                # anta meta innehåller filename eller id
-                self.all_image_ids.extend([m if isinstance(m, str) else m['local_filename'] for m in meta])
-        self.all_image_feats = torch.cat(self.all_image_feats, dim=0)  # (N, D)
+
+                # Map batch to file paths
+                batch_size = images.size(0)
+                batch_paths = all_paths[global_idx : global_idx + batch_size]
+                self.all_image_ids.extend(batch_paths)
+                global_idx += batch_size
+
+        # Concatenate all feature batches
+        self.all_image_feats = torch.cat(self.all_image_feats, dim=0)
+
+        # Save index
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
+        #index_path = os.path.join(os.path.dirname(index_path), "image_index.pt")
+        torch.save({
+            "feats": self.all_image_feats,   # CPU tensor
+            "paths": self.all_image_ids
+        }, index_path)
+
+        print(f"Saved {len(self.all_image_ids)} indexed images to {index_path}")
 
     def search_by_image(self, query_image, k=10):
-        """Return top-k most similar images from the indexed dataset given a query image."""
+        """
+        Return the top-k most similar images from the indexed dataset.
+        Features are stored on CPU, but similarity search is performed on GPU.
+        """
+
         self.model.eval()
+
+        # Load image if a path is provided
+        if isinstance(query_image, str):
+            query_image = Image.open(query_image).convert("RGB")
+
         with torch.no_grad():
-            q = self.model.encode_image(self.preprocess(query_image).unsqueeze(0).to(self.device))
+            # Encode query on GPU
+            q = self.preprocess(query_image).unsqueeze(0).to(self.device)
+            q = self.model.encode_image(q)
             q = q / q.norm(dim=-1, keepdim=True)
-            sims = (q @ self.all_image_feats.T).squeeze(0)  # (N,)
+
+            # Move CPU index to GPU for fast similarity search
+            feats_gpu = self.all_image_feats.to(self.device)
+
+            # Compute similarities
+            sims = (q @ feats_gpu.T).squeeze(0)
+
+            # Top-k retrieval
             topk = sims.topk(k)
-            return [(self.all_image_ids[i], float(sims[i])) for i in topk.indices.tolist()]
+            indices = topk.indices.tolist()
+
+        return [(self.all_image_ids[i], float(sims[i])) for i in indices]
+
 
     def search_by_text(self, prompt, k=10):
         """Tokenisera prompt, enkoda och returnera top-k bilder."""

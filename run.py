@@ -63,7 +63,7 @@ if __name__ == "__main__":
     seed = config.getint('SETUP', 'seed')
     batch = config.getint('SETUP', 'batch')  # depends on GPU/CPU capabilities
     top_N = config.getint('SETUP', 'top_N')  # top N predictions, 3 is enough, 11 for "raw" scores (most scores are 0)
-
+    image_features_path = config.get('SETUP', 'image_features')  # path to precomputed image features for evaluation speed-up (optional)
     base_model = config.get('SETUP', 'base_model')  # do not change
     config_format = config.get('SETUP', 'files_format')  # input image format, e.g. PNG
     raw = config.getboolean('SETUP', 'raw')
@@ -149,6 +149,7 @@ if __name__ == "__main__":
     parser.add_argument('--prompt_path', type=str, default=prompt_path, help='Path to TSV file with filename-prompt mapping for one-to-one training/evaluation.')
     parser.add_argument('--metadata_path', type=str, default=metadata_path, help='Path to category description templates with metadata placeholder for formatting.')
     parser.add_argument('--ensemble', action='store_true', default=ensemble, help='Use ensemble of models for prediction (only for evaluation, not for training).')
+    parser.add_argument("--image_features", type=str, default=image_features_path, help="Path to precomputed image features for evaluation speed-up (optional).")
     # Common arguments
     parser.add_argument('-tn', "--topn", type=int, default=top_N, help="Number of top result categories to consider.")
 
@@ -159,7 +160,7 @@ if __name__ == "__main__":
                         help="Path to the saved model checkpoint (.pt file) or a model folder (inside `models` folder).")
     parser.add_argument("--model_dir", type=str, default=hf_models_directory,
                         help="Path to the directory of saved model checkpoints (.pt files) for evaluation.")
-
+    parser.add_argument("--image_search", action="store_true", help="Search for similar images in the evaluation dataset given a query image.")
     parser.add_argument('-rev', "--revision", type=str, default=None, help="HuggingFace revision (e.g. `main`, `vN.0` or `vN.M`)")
     parser.add_argument("--hf", help="Use model and processor from the HuggingFace repository", default=HF, action="store_true")
     parser.add_argument("--raw", help="Output raw scores for each category", default=raw, action="store_true")
@@ -203,7 +204,7 @@ if __name__ == "__main__":
         ",".join(("{}={}".format(re.sub("(.)[^_]*_?", r"\1", k), v) for k, v in sorted(vars(args).items()) if v
                   is not None and k not in (
                       "file", "directory", "dir", "eval", "train", "model_path","prompt_path", "model", "cat_prefix", "model_dir",
-                      "eval_dir", "vis", "raw", "safe", "cat_dir", "hf", "cat_csv", "file_format","metadata_path")))
+                      "eval_dir", "vis", "raw", "safe", "cat_dir", "hf", "cat_csv", "file_format","metadata_path","image_features","one_2_one")))
     ))
 
 
@@ -219,7 +220,7 @@ if __name__ == "__main__":
     output_dir.mkdir(exist_ok=True)
 
     cat_directory = str(cur / args.cat_dir)
-    print("SplIT",args.advanced_split)
+    print(args.image_search)
     if not args.vis and not args.best and not args.eval_dir:
         clip_instance = CLIP(max_category_samples=args.max_categ, test_ratio=test_size,
                              eval_max_category_samples=args.max_categ_eval,
@@ -386,6 +387,19 @@ if __name__ == "__main__":
             clip_instance.predict_directory(str(input_dir_pred), raw=raw, chunk_size=chunk_size,)
         else:
             print("Please specify a file (-f) or a directory (-d) for zero-shot prediction.")
+
+    elif args.image_search:
+        print(args.image_features)
+        if args.file:
+            dataset,dataloader = clip_instance.load_dataset(data_dir_eval, batch_size=args.batch_size)
+            clip_instance.build_image_index(dataset, dataloader,index_path=args.image_features)
+            similar_images = clip_instance.search_by_image(args.file)
+            print(f"Top {args.topn} similar images to {args.file}:")
+            for img_path, score in similar_images:
+                print(f"\t{img_path} (similarity: {round(score * 100, 2)}%)")
+        else:
+            print("Please specify a query image file with -f for image search.")
+    
     else:
         if args.file:
             if not args.best:

@@ -38,7 +38,8 @@ categories_prefix = page_categories
 one2one = False
 ensemble = False
 metadata_path = C:\\RA-CLIP\\Dataset_03_24\trying_images.csv
-model_storage = C:\\ufal\\atrium-page-classification
+model_storage = C:\\RA_ufal_atrium\\atrium-page-classification-RA-fork-\\models
+image_features = C:\\RA_ufal_atrium\\atrium-page-classification-RA-fork-\\features
 
 [INPUT]
 FOLDER_INPUT=C:\\RA-CLIP\\test_set
