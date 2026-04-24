@@ -339,13 +339,13 @@ def plot_classification_report(classification_report, title='Classification repo
             continue
 
         # slå ihop tvåordsklasser som "macro avg" och "weighted avg"
-        if t[0] in ("macro", "weighted","accuracy"): #and t[1] == "avg":
+        if t[0] in ("macro", "weighted","accuracy","micro"): #and t[1] == "avg":
             #t[0] = t[0] + "_" + t[1]   # macro_avg / weighted_avg
             #t.pop(1)                   # ta bort "avg"
         #if t[0] == "accuracy":
             continue
         classes.append(t[0])
-
+        #print(t)
         # nu är t t.ex. ["macro_avg", "0.899", "0.932", "0.914", "225"]
         v = [float(x) for x in t[1: len(t) - 1]]
         support.append(int(t[-1]))

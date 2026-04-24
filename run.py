@@ -59,7 +59,8 @@ if __name__ == "__main__":
     config.read('config.txt')
 
     #def_categ = ["DRAW", "DRAW_L", "LINE_HW", "LINE_P", "LINE_T", "PHOTO", "PHOTO_L", "TEXT", "TEXT_HW", "TEXT_P", "TEXT_T"]
-    def_categ = ["DRAW", "LINE_MIX", "LINE_HW", "LINE_PT", "PHOTO", "TEXT", "TEXT_HW", "TEXT_PT","MISC"]
+    #def_categ = ["DRAW", "LINE_MIX", "LINE_HW", "LINE_TP", "PHOTO", "TEXT", "TEXT_HW", "TEXT_TP","MISC"]
+    def_categ = config.get('SETUP', 'def_categ')  # categories to use for training/evaluation, separated by comma, e.g. "DRAW,LINE,PHOTO,TEXT"
     seed = config.getint('SETUP', 'seed')
     batch = config.getint('SETUP', 'batch')  # depends on GPU/CPU capabilities
     top_N = config.getint('SETUP', 'top_N')  # top N predictions, 3 is enough, 11 for "raw" scores (most scores are 0)
@@ -177,7 +178,7 @@ if __name__ == "__main__":
         if not any(link for link in revision_to_base_model if args.revision.startswith(link)):
             raise ValueError(f"Revision {args.revision} is not supported. Available revisions: {list(revision_to_base_model.keys())}")
         print(args.model)
-        #print(base_model)
+        print(base_model)
         base_model = revision_to_base_model[args.revision[:len(revision_to_base_model.keys().__iter__().__next__())]]
         print(base_model)
         if args.model != base_model:
@@ -204,11 +205,11 @@ if __name__ == "__main__":
         ",".join(("{}={}".format(re.sub("(.)[^_]*_?", r"\1", k), v) for k, v in sorted(vars(args).items()) if v
                   is not None and k not in (
                       "file", "directory", "dir", "eval", "train", "model_path","prompt_path", "model", "cat_prefix", "model_dir",
-                      "eval_dir", "vis", "raw", "safe", "cat_dir", "hf", "cat_csv", "file_format","metadata_path","image_features","one_2_one")))
+                      "eval_dir", "vis", "raw", "safe", "cat_dir", "hf", "cat_csv", "file_format","metadata_path","image_features","one_2_one","base")))
     ))
 
-
     args.logdir += f"-{args.model.replace('/', '_')}" if args.model else ""
+
     os.makedirs(args.logdir, exist_ok=True)
     print("Arguments:")
     for arg in vars(args):
@@ -220,7 +221,7 @@ if __name__ == "__main__":
     output_dir.mkdir(exist_ok=True)
 
     cat_directory = str(cur / args.cat_dir)
-    print(args.image_search)
+
     if not args.vis and not args.best and not args.eval_dir:
         clip_instance = CLIP(max_category_samples=args.max_categ, test_ratio=test_size,
                              eval_max_category_samples=args.max_categ_eval,
@@ -251,6 +252,24 @@ if __name__ == "__main__":
 
     model_cp_path = Path(cp_dir / f"{model_name_local}_{args.epochs}e.pt")
     print(f"Model checkpoints folder \t{model_cp_path}")
+
+    if args.zero_shot or args.hf:
+        model_path_str = None
+    else:
+        model_path_str = args.model_path
+        print(f"Model path provided: {model_path_str}")
+        if model_path_str is None:
+            if model_cp_path.is_file():
+                model_path_str = str(model_cp_path)
+            else:
+                model_cp_path = Path(str(model_cp_path).replace("e.pt", "e.cp.pt"))
+
+                if not model_cp_path.is_file():
+                    raise ValueError(
+                        f"Model file or checkpoint {model_cp_path} are not found at default paths. Please provide a path using --model_path.")
+                else:
+                    model_path_str = str(model_cp_path)
+
 
     if args.hf:
         # saving model to local path
@@ -301,7 +320,7 @@ if __name__ == "__main__":
             print(f"Warning: Evaluation directory not found at: {data_dir_eval}. Using training directory for evaluation.")
             data_dir_eval = data_dir
 
-        clip_instance.train(
+        clip_instance.train_model(
             train_dir=data_dir,
             eval_dir=data_dir_eval if args.eval else None,
             log_dir=args.logdir,
@@ -330,23 +349,6 @@ if __name__ == "__main__":
         clip_instance.cluster_dataset(dataset, dataloader)
         
     if args.eval:
-        if args.zero_shot:
-            model_path_str = None
-        else:
-            model_path_str = args.model_path
-            print(f"Model path provided: {model_path_str}")
-            if model_path_str is None:
-                if model_cp_path.is_file():
-                    model_path_str = str(model_cp_path)
-                else:
-                    model_cp_path = Path(str(model_cp_path).replace("e.pt", "e.cp.pt"))
-
-                    if not model_cp_path.is_file():
-                        raise ValueError(
-                            f"Model file or checkpoint {model_cp_path} are not found at default paths. Please provide a path using --model_path.")
-                    else:
-                        model_path_str = str(model_cp_path)
-
 
         if not os.path.isdir(data_dir_eval):
             print(f"Warning: Evaluation directory not found at: {data_dir_eval}. Using training directory for evaluation.")
@@ -379,10 +381,11 @@ if __name__ == "__main__":
             top_N=args.topn
         )
     elif args.zero_shot:  # New branch for zero-shot prediction
+
         if args.file:
             prediction = clip_instance.predict_single(args.file)
             print(f"Zero-shot prediction for {args.file}: {prediction}")
-        elif args.dir:
+        elif args.directory:
             input_dir_pred = Path(args.directory) if args.directory is not None else cur / 'category_samples'
             clip_instance.predict_directory(str(input_dir_pred), raw=raw, chunk_size=chunk_size,)
         else:
@@ -404,12 +407,12 @@ if __name__ == "__main__":
         if args.file:
             if not args.best:
                 if args.topn > 1:
-                    scores, labels = clip_instance.predict_top_N(args.file)
+                    scores, labels = clip_instance.predict_top_N(args.file,model_path=model_path_str)
                     print(f"File {args.file} predicted:")
                     for lab, sc in zip(labels, scores):
                         print(f"\t{lab}:  {round(sc * 100, 2)}%")
                 else:
-                    prediction = clip_instance.predict_single_best(args.file)
+                    prediction = clip_instance.predict_single_best(args.file,model_path=model_path_str)
                     print(f"Prediction for {args.file}:\n{prediction}")
             else:
                 all_best_predictions = {}
@@ -468,7 +471,8 @@ if __name__ == "__main__":
 
         if args.dir or args.directory is not None:
             if not args.best:
-                clip_instance.predict_directory(str(input_dir), raw=raw, chunk_size=chunk_size)
+                clip_instance.predict_directory(str(input_dir), raw=raw, chunk_size=chunk_size,
+                                                model_path = model_path_str)
             else:
                 all_best_directory_output = {}
 

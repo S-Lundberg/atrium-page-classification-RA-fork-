@@ -91,7 +91,7 @@ class ImageFolderCustom(torch.utils.data.Dataset):
             for file_path in all_files_in_category:
                 self.paths.append(file_path)
                 self.targets.append(class_idx)
-
+        #print(f"Loaded {len(self.paths)} images from {len(self.classes)} classes")
         if prompt_path is not None:
             df = pd.read_csv(prompt_path, sep="\t")
 
@@ -140,8 +140,8 @@ class ImageFolderCustom(torch.utils.data.Dataset):
                 print(f"Loaded prompts for {len(self.prompts_by_file)} files from {prompt_path}")
             except Exception as e:
                 print(f"Could not load prompts_by_file from {prompt_path}: {e}")
-
         # Apply splitting strategy
+        
         if self.use_advanced_split:
             from classifier import CLIP, split_data_80_10_10
             print(f"{self.use_advanced_split}")
@@ -230,10 +230,12 @@ class ImageFolderCustom(torch.utils.data.Dataset):
                 self.paths = test_files.tolist()
                 self.targets = test_labels.tolist()
 
-        print(f"\t{split_type}'s set images loaded: {len(self.paths)}")
+            print(f"\t{split_type}'s set images loaded: {len(self.paths)}")
 
     def load_image(self, index: int) -> Image.Image:
         image_path = self.paths[index]
+    #    print("[TEST FILE PATH]", self.paths[index])
+
         return Image.open(image_path)
 
     def __len__(self) -> int:
@@ -243,13 +245,12 @@ class ImageFolderCustom(torch.utils.data.Dataset):
         try:
             img = self.load_image(index)
             img.load()
-
             class_idx = self.targets[index]
             filename = os.path.basename(self.paths[index])
 
-            if self.preprocess:
-                img = self.preprocess(img)
-
+            img = self.preprocess(img)
+            #print("[TEST RAW MODE]", img.mode)
+            #print("[TEST RAW SIZE]", img.size)
             # Retrieve precomputed prompts
             label_name = self.classes[class_idx]
             prompts = self.prompts_by_file.get(filename, [])
@@ -1235,7 +1236,10 @@ def load_categories(tsv_file, directory = None, prefix=None):
         return {}
 
     if prefix:
+
         files_to_load = list(base_dir.glob(f"{prefix}*.tsv")) + list(base_dir.glob(f"{prefix}*.csv"))
+        print("############ Category Loading with Prefix ###########")
+
         if not files_to_load:
             print(f"Warning: No TSV files with prefix '{prefix}' found in {base_dir}. Using default categories.")
             return {"DRAW": ["a drawing"], "PHOTO": ["a photo"], "TEXT": ["text"], "LINE": ["a table"]}

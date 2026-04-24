@@ -109,7 +109,7 @@ def create_prompt(metadata_csv_path, category_tsv_path=None, out_path=None):
     truncs = 0
     # Load class templates
     if category_tsv_path:
-        print(f"Loading category prompt templates from TSV: {category_tsv_path}")
+        print(f"Loading category prompt templates from: {category_tsv_path}")
         df_cat = pd.read_csv(category_tsv_path, sep=",")
         templates_by_class = df_cat.groupby("label")["description"].apply(list).to_dict()
     else:
@@ -204,9 +204,10 @@ def create_prompt(metadata_csv_path, category_tsv_path=None, out_path=None):
     out_path = out_path or Path("category_descriptions/prompts/")
     out_path.mkdir(parents=True, exist_ok=True)
     out_df = pd.DataFrame(prompts_out)
-    out_df.to_csv(out_path / "dataset_prompts.tsv", sep="\t", index=False)
+    out_file = "test_set_prompts.tsv"
+    out_df.to_csv(out_path / out_file, sep="\t", index=False)
     print(f"Truncated prompts: {truncs} out of {len(prompts_out)} total prompts.")
-    print(f"Done! Created dataset_prompts.tsv with {len(prompts_out)} prompts.")
+    print(f"Done! Created {out_file} with {len(prompts_out)} prompts.")
 
 
 
@@ -240,7 +241,7 @@ def build_metadata(row):
             parts.append(f"från {arkiv}, {serie}")
 
     if "datering" in row and pd.notna(row["datering"]):
-        parts.append(f"daterat: {row['datering']}")
+        parts.append(f"dated: {row['datering']}")
     return ", ".join(parts) if parts else "."
 
 def create_prompt_old(csv_path):
@@ -262,7 +263,7 @@ def create_prompt_old(csv_path):
 
     out_path = "category_descriptions\\prompts\\"
     out_df = pd.DataFrame(prompts)
-    out_df.to_csv(out_path + "dataset_prompts.tsv", sep="\t", index=False)
+    out_df.to_csv(out_path + "test_set_prompts.tsv", sep="\t", index=False)
 
     print("Klar! prompts.tsv skapad.")
 

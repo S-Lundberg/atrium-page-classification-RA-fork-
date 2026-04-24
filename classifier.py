@@ -1,5 +1,7 @@
+import hashlib
+
 import h5py
-from matplotlib import pyplot as plt
+from matplotlib import image, pyplot as plt
 import numpy as np
 import pandas as pd
 #import torch
@@ -21,6 +23,8 @@ import clip
 from PIL import Image, ImageEnhance, ImageFilter
 
 from huggingface_hub import PyTorchModelHubMixin
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
 Image.MAX_IMAGE_PIXELS = 700_000_000
 import string
@@ -211,6 +215,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         self.categories_dir = categories_dir
         self.categories_tsv = categories_tsv
         self.metadata_path  = metadata_path
+        
     def aggregate_prompts(self, prompts, strategy="mean"):
         if len(prompts) == 0:
             D = self.model.text_projection.shape[1]
@@ -229,9 +234,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         return out / out.norm()
 
-
-
-    def _get_averaged_text_features_old(self):
+    def _get_averaged_text_features(self):
         """Computes averaged text features for each category."""
         all_features = []
         with torch.no_grad():
@@ -246,7 +249,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 all_features.append(mean_features)
         return torch.stack(all_features)
 
-    def _get_averaged_text_features(self):
+    def _get_averaged_text_features_NEW(self):
         """Computes averaged text features for each category and plots 1D heatmaps per prompt + mean."""
         all_features = []
 
@@ -285,13 +288,14 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 plt.xlabel("embedding dimension")
                 plt.tight_layout()
                 plt.savefig(self.output_dir / "embeddings" / f"{self.model_code_name}_{category}_embedding_heatmap.png")
+                plt.close()
                 # --- END SUBPLOTS ---
 
                 all_features.append(mean_features)
 
         return torch.stack(all_features)
 
-    def train(self, train_dir: str, log_dir: str, eval_dir: str = None,
+    def train_model(self, train_dir: str, log_dir: str, eval_dir: str = None,
               num_epochs: int = 5, batch_size: int = 8, learning_rate: float = 1e-7):
         """
         Fine-tunes the CLIP model based on the provided training and evaluation directories.
@@ -351,10 +355,11 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                                                        collate_fn=collate_with_prompts if self.ensemble else None)
         if self.plot_embeddings:
             print("#####  Plotting prompt embeddings...  ######\n")
-            if self.avg:
-                self.plot_prompt_embeddings(train_dataloader, batch_idx=0)
-            self.plot_image_embeddings_2d(train_dataloader,train_labels, n_batches=100)
+            #if self.avg:
+            self.plot_prompt_embeddings(train_dataloader, batch_idx=0)
+            #self.plot_image_embeddings_2d(train_dataloader,train_labels, n_batches=100)
             self.plot_image_embeddings_2d(train_dataloader,train_labels, n_batches=100, method="tsne")
+
         test_dataset = ImageFolderCustom(train_dir, model_name=self.model_code_name,
                                           max_category_samples=self.upper_category_limit,
                                           prompt_path=prompt_path,
@@ -559,13 +564,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
                     else:
                         similarity = (100.0 * image_features @ text_features_eval.T)
-                    #print("\n--- DEBUG SHAPES ---")
-                    #print("similarity.shape:", similarity.shape)
-                    #print("class_ids.shape:", class_ids.shape)
-                    #print("unique class_ids:", class_ids.unique())
-                    #print("num_classes (model):", self.num_classes)
-                    #print("one2one:", self.one_2_one)
-                    #print("---------------------\n")
+
                     acc_top1_metric.update(similarity, class_ids)
                     acc_top3_metric.update(similarity, class_ids)
 
@@ -637,19 +636,36 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         model_name = Path(model_path).stem if model_path is not None else self.model_code_name
         prompt_path = self.prompt_path if (self.prompt_path is not None and (self.one_2_one or self.ensemble)) else None
-        eval_dataset = ImageFolderCustom(eval_dir, max_category_samples=None,
+        #eval_dataset = ImageFolderCustom(eval_dir, max_category_samples=None,
+        #                                 prompt_path=prompt_path,
+        #                                 preprocess_fn=self.preprocess, img_size=self.preprocess.transforms[0].size,
+        #                                 file_format=self.file_format, use_advanced_split=False,
+        #                                 split_type='test', seed=self.seed, model_name=model_name,
+        #                                 avg=self.avg, one_2_one=self.one_2_one, ensemble=self.ensemble)
+        #eval_dataloader = torch.utils.data.DataLoader(eval_dataset, batch_size=batch_size)
+        eval_dataset = ImageFolderCustom(train_dir if eval_dir is None else eval_dir,
+                                         model_name=self.model_code_name,
+                                         max_category_samples=self.upper_category_limit,
                                          prompt_path=prompt_path,
-                                         preprocess_fn=self.preprocess, img_size=self.preprocess.transforms[0].size,
-                                         file_format=self.file_format, use_advanced_split=False,
-                                         split_type='test', seed=self.seed, model_name=model_name,
-                                         avg=self.avg, one_2_one=self.one_2_one, ensemble=self.ensemble)
-        eval_dataloader = torch.utils.data.DataLoader(eval_dataset, batch_size=batch_size)
+                                         preprocess_fn=self.preprocess,
+                                         img_size=self.preprocess.transforms[0].size,
+                                         use_advanced_split=(eval_dir is None),  # Enable new split
+                                         split_type='test', seed=self.seed,
+                                         file_format=self.file_format,
+                                         test_ratio=self.test_fraction,
+                                        avg=self.avg,
+                                          one_2_one=self.one_2_one,
+                                          ensemble=self.ensemble)
+        #first_path = eval_dataset.paths[0]
+        #self.debug_report(img_path=first_path)
 
+        eval_dataloader = torch.utils.data.DataLoader(eval_dataset, batch_size=batch_size,
+                                                      collate_fn=collate_with_prompts if self.ensemble else None)
         print("Starting evaluation of the loaded model...")
         self.test(eval_dataloader, image_files=eval_dataset.paths)
         print("Evaluation finished.")
 
-    def top_N_prediction(self, image_data: torch.Tensor, N: int):
+    def top_N_prediction_old(self, image_data: torch.Tensor, N: int):
         """
         Predicts the top N categories for a given image tensor.
         :param image_data: A tensor of shape (1, 3, H, W) representing the image.
@@ -673,6 +689,137 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         best_n_indices = np.argsort(pred_scores)[-N:][::-1]
         best_n_scores = pred_scores[best_n_indices]
         return best_n_scores, best_n_indices, pred_scores
+    
+    def top_N_prediction_NEW(self, image_data: torch.Tensor, N: int, prompts=None):
+        """
+        Predict top-N categories for a single image, using EXACTLY the same logic as test().
+        """
+        self.model.eval()
+        image_data = image_data.to(self.device)
+
+        with torch.no_grad():
+
+            # ---------------------------------------------------------
+            # IMAGE FEATURES
+            # ---------------------------------------------------------
+            image_features = self.model.encode_image(image_data)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+            # ---------------------------------------------------------
+            # TEXT FEATURE SETUP (identisk med test())
+            # ---------------------------------------------------------
+            if self.avg:
+                # Precomputed averaged class embeddings
+                text_features_eval = self.text_features.to(self.device)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            elif self.ensemble:
+                # prompts måste vara list[str]
+                assert prompts is not None, "prompts must be provided for ensemble mode"
+
+                text_emb = self.aggregate_prompts(prompts, strategy="mean")
+                text_features_eval = text_emb.unsqueeze(0).to(self.device)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            elif self.one_2_one:
+                # prompts måste vara list[str] (samma som test())
+                assert prompts is not None, "prompts must be provided for one_2_one mode"
+
+                texts = clip.tokenize(prompts).to(self.device)
+                text_features_eval = self.model.encode_text(texts)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            else:
+                # zero-shot fallback: "a scan of {class}"
+                all_texts = torch.cat([clip.tokenize(f"a scan of {c}") for c in self.texts]).to(self.device)
+                text_features_eval = self.model.encode_text(all_texts)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            # ---------------------------------------------------------
+            # SIMILARITY (identisk med test())
+            # ---------------------------------------------------------
+            if self.ensemble:
+                # ensemble använder klassernas medelvärdes-embeddings
+                class_text_feats = self.text_features.to(self.device)
+                class_text_feats = class_text_feats / class_text_feats.norm(dim=-1, keepdim=True)
+                similarity = 100.0 * (image_features @ class_text_feats.T)
+            else:
+                similarity = 100.0 * (image_features @ text_features_eval.T)
+
+
+        # ---------------------------------------------------------
+        # TOP-N
+        # ---------------------------------------------------------
+        sim = similarity.cpu().numpy()[0]
+        best_n_indices = sim.argsort()[-N:][::-1]
+        best_n_scores = sim[best_n_indices]
+
+        return best_n_scores, best_n_indices, sim
+
+
+    def top_N_prediction(self, image_data: torch.Tensor, N: int, prompts=None):
+        """
+        Predict top-N categories for a single image, using the SAME logic as evaluation.
+        """
+        self.model.eval()
+        image_data = image_data.to(self.device)
+
+        with torch.no_grad():
+
+            # --- IMAGE FEATURES ---
+            image_features = self.model.encode_image(image_data)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+            # --- TEXT FEATURES (match evaluation setup) ---
+            if self.avg:
+                # Precomputed averaged class embeddings
+                text_features_eval = self.text_features.to(self.device)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            elif self.ensemble:
+                # prompts måste vara list[str] för denna bild
+                assert prompts is not None, "prompts must be provided for ensemble mode"
+
+                # per-image prompt aggregation
+                text_emb = self.aggregate_prompts(prompts, strategy="mean")
+                text_features_eval = text_emb.unsqueeze(0).to(self.device)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            elif self.one_2_one:
+                # prompts måste vara str för denna bild
+                assert prompts is not None, "prompts must be provided for one_2_one mode"
+
+                texts = clip.tokenize([prompts]).to(self.device)
+                text_features_eval = self.model.encode_text(texts)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            else:
+                # zero-shot fallback: "a scan of {class}"
+                all_texts = torch.cat([clip.tokenize(f"a scan of {c}") for c in self.texts]).to(self.device)
+                text_features_eval = self.model.encode_text(all_texts)
+                text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+            # --- SIMILARITY (match evaluation) ---
+            if self.ensemble:
+                # ensemble använder klassernas medelvärdes-embeddings för klassificering
+                class_text_feats = self.text_features.to(self.device)
+                class_text_feats = class_text_feats / class_text_feats.norm(dim=-1, keepdim=True)
+                similarity = (100.0 * image_features @ class_text_feats.T)
+
+            else:
+                similarity = (100.0 * image_features @ text_features_eval.T)
+
+            # --- PROBABILITIES ---
+            #probs = similarity.softmax(dim=-1).cpu().numpy()[0]
+
+        # --- TOP-N ---
+        #best_n_indices = probs.argsort()[-N:][::-1]
+        #best_n_scores = probs[best_n_indices]
+        sim = similarity.cpu().numpy()[0]
+        best_n_indices = sim.argsort()[-N:][::-1]
+        best_n_scores = sim[best_n_indices]
+        return best_n_scores, best_n_indices, sim
+        #return best_n_scores, best_n_indices, probs
 
     def prediction(self, image_data: torch.Tensor) -> (np.array, int):
         """
@@ -684,7 +831,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         scores, indices, _ = self.top_N_prediction(image_data.unsqueeze(0), len(self.categories))
         return scores, indices[0]
 
-    def test(self, test_dataloader: torch.utils.data.DataLoader, image_files: list,
+    def test_old(self, test_dataloader: torch.utils.data.DataLoader, image_files: list,
              vis: bool = True, tab: bool = True):
         """
         Evaluates the model on the provided test dataloader and generates a confusion matrix plot.
@@ -718,6 +865,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
                 text_features_test /= text_features_test.norm(dim=-1, keepdim=True)
 
         with torch.no_grad():
+
             for images, class_ids, prompts in tqdm(test_dataloader, desc="Testing"):
                 images = images.to(self.device)
                 image_features = self.model.encode_image(images)
@@ -776,7 +924,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             disp = ConfusionMatrixDisplay.from_predictions(
                 np.array(all_true_labels), np.array(all_predictions),labels=labels,
                   cmap='inferno',
-                #normalize="true",
+                normalize="true",
                   display_labels=np.array(display_labels)
             )
             tick_positions = disp.ax_.get_xticks()
@@ -800,6 +948,148 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         return acc
 
+    def test(self, test_dataloader: torch.utils.data.DataLoader, image_files: list,
+            vis: bool = True, tab: bool = True):
+        """
+        Evaluates the model on the provided test dataloader and generates a confusion matrix plot.
+        :param test_dataloader:
+        :param vis:
+        :return:
+        """
+
+        plot_path = Path(f'{self.output_dir}/plots')
+        table_path = Path(f'{self.output_dir}/tables')
+        plot_path.mkdir(parents=True, exist_ok=True)
+        time_stamp = time.strftime("%Y%m%d-%H%M")
+
+        all_pred_scores = []
+        all_predictions = []
+        all_true_labels = []
+
+        self.model.eval()
+
+        # --- TEXT FEATURES SETUP (samma som evaluation) ---
+        if self.avg:
+            text_features_test = self.text_features.to(self.device)
+            text_features_test = text_features_test / text_features_test.norm(dim=-1, keepdim=True)
+
+        elif self.ensemble:
+            text_features_test = None  # beräknas per bild
+
+        else:
+            if self.one_2_one:
+                text_features_test = None  # beräknas per batch
+            else:
+                all_texts = torch.cat([clip.tokenize(f"a scan of {c}") for c in self.texts]).to(self.device)
+                with torch.no_grad():
+                    text_features_test = self.model.encode_text(all_texts)
+                    text_features_test = text_features_test / text_features_test.norm(dim=-1, keepdim=True)
+
+        all_predictions = []
+        all_true_labels = []
+        all_pred_scores = []
+        with torch.no_grad():
+            for images, class_ids, prompts in tqdm(test_dataloader, desc="Testing"):
+
+                images = images.to(self.device)
+                class_ids = class_ids.to(self.device)
+
+                # --- IMAGE FEATURES ---
+                image_features = self.model.encode_image(images)
+                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+
+
+                # --- TEXT FEATURES PER BATCH (match evaluation) ---
+                if self.one_2_one:
+                    texts = clip.tokenize(prompts).to(self.device)
+                    text_features_eval = self.model.encode_text(texts)
+                    text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+                elif self.ensemble:
+                    per_image_text_feats = []
+                    for prompt_list in prompts:
+                        text_emb = self.aggregate_prompts(prompt_list, strategy="mean")
+                        per_image_text_feats.append(text_emb)
+
+                    text_features_eval = torch.stack(per_image_text_feats).to(self.device)
+                    text_features_eval = text_features_eval / text_features_eval.norm(dim=-1, keepdim=True)
+
+                else:
+                    text_features_eval = text_features_test
+
+                # --- SIMILARITY (match evaluation) ---
+                if self.ensemble:
+                    class_text_feats = self.text_features.to(self.device)
+                    class_text_feats = class_text_feats / class_text_feats.norm(dim=-1, keepdim=True)
+                    similarity = (100.0 * image_features @ class_text_feats.T)
+                else:
+                    similarity = (100.0 * image_features @ text_features_eval.T)
+
+                # --- PREDICTION ---
+                all_pred_scores.append(similarity.cpu().numpy())
+                _, predicted_labels = similarity.max(dim=1)
+
+                all_predictions.extend(predicted_labels.cpu().numpy())
+                all_true_labels.extend(class_ids.cpu().numpy())
+
+        acc = round(100 * (np.array(all_predictions) == np.array(all_true_labels)).mean(), 2)
+
+        print("=" * 40)
+        print('\t*\tAccuracy: ', acc)
+        print("=" * 40)
+
+        all_pred_scores = np.vstack(all_pred_scores)
+
+        # max_logits = np.max(all_pred_scores, axis=1, keepdims=True)
+        # exp_logits = np.exp(all_pred_scores - max_logits)
+        # all_pred_probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+        number_of_samples = all_pred_scores.shape[0]
+
+        plot_image = plot_path / f'{time_stamp}_{number_of_samples}{"_zero" if self.zero_shot else ""}_EVAL_TOP-{self.top_N}_{self.model_code_name}.png'
+        table_file = table_path / f'{time_stamp}_{number_of_samples}{"_zero" if self.zero_shot else ""}_EVAL_TOP-{self.top_N}_{self.model_code_name}.csv'
+        plot_report= plot_path / f'{time_stamp}_{number_of_samples}{"_zero" if self.zero_shot else ""}_CLASSI_REPORT_TOP-{self.top_N}_{self.model_code_name}.png'
+
+        if vis:
+            # Ensure display labels match the order of predictions
+            display_labels = self.categories if self.avg else test_dataloader.dataset.classes
+            num_classes = len(display_labels)
+            labels = list(range(num_classes))
+            report = classification_report(
+                    np.array(all_true_labels),
+                    np.array(all_predictions),
+                    labels=labels,
+                    target_names=display_labels,
+                    digits=3,
+                    zero_division=0)
+            main_class_report(report,plot_report)
+            disp = ConfusionMatrixDisplay.from_predictions(
+                np.array(all_true_labels), np.array(all_predictions),labels=labels,
+                cmap='inferno',
+                normalize="true",
+                display_labels=np.array(display_labels)
+            )
+            tick_positions = disp.ax_.get_xticks()
+            short_labels = [f"{label[0]}{label.split('_')[-1][0] if '_' in label else ''}" for label in disp.display_labels]
+            disp.ax_.set_xticks(tick_positions)
+            disp.ax_.set_xticklabels(short_labels)
+
+            disp.ax_.set_title(f"TOP {self.top_N} {self.model_code_name} CM  - {acc}%")
+            plt.savefig(plot_image, bbox_inches='tight', dpi=300)
+            plt.close()
+            print(f"Confusion matrix saved to {plot_image}")
+
+        if tab:
+            out_df, _ = dataframe_results(test_images= image_files, test_predictions=all_pred_scores, raw_scores=None,
+                                        top_N= self.top_N, categories=self.categories)
+            all_true_labels = np.asarray(all_true_labels, dtype=int)
+            out_df["TRUE"] = [self.categories[i] for i in all_true_labels]
+            out_df.sort_values(['FILE', 'PAGE'], ascending=[True, True], inplace=True)
+            out_df.to_csv(table_file, sep=",", index=False)
+            print(f"Results for TOP-{self.top_N} predictions are recorded into {self.output_dir}/tables/ directory:\n{table_file}")
+
+        return acc
 
     def save_model(self, save_directory: str):
         """
@@ -939,12 +1229,21 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         print(f"Model and configuration loaded from the Hugging Face Hub: {repo_id}")
 
 
-    def predict_single_best(self, image_file: str) -> dict:
+    def predict_single_best(self, image_file: str,model_path: str | None = None) -> dict:
         """
         Predicts the category of a single image file.
         :param image_file:
         :return:
         """
+        if model_path is not None:
+            if Path(model_path).is_file():
+                print(f"Loading model from {model_path} for evaluation...")
+                checkpoint = torch.load(model_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                print(f"Model loaded from epoch {checkpoint['epoch']+1} with loss {checkpoint['loss']:.4f}.")
+            else:
+                print(f"Loading from directory {model_path} using HF Hub mixin...")
+                self.load_model(load_directory=model_path, revision=model_path.split("_")[-1] if "_" in model_path else "main")
         image = Image.open(image_file)
         image_input = self.preprocess(image).unsqueeze(0).to(self.device)
 
@@ -955,12 +1254,21 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         # return results
 
 
-    def predict_top_N(self, image_file: str) -> (list, list):
+    def predict_top_N(self, image_file: str,model_path: str | None = None) -> (list, list):
         """
         Predicts the TOP-N categories of a single image file.
         :param image_file:
         :return:
         """
+        if model_path is not None:
+            if Path(model_path).is_file():
+                print(f"Loading model from {model_path} for evaluation...")
+                checkpoint = torch.load(model_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                print(f"Model loaded from epoch {checkpoint['epoch']+1} with loss {checkpoint['loss']:.4f}.")
+            else:
+                print(f"Loading from directory {model_path} using HF Hub mixin...")
+                self.load_model(load_directory=model_path, revision=model_path.split("_")[-1] if "_" in model_path else "main")
         image = Image.open(image_file)
         image_input = self.preprocess(image).unsqueeze(0).to(self.device)
 
@@ -970,7 +1278,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         return best_n_scores, pred_labels
 
     def predict_directory(self, folder_path: str, raw: bool = False, out_table: str = None,
-                          chunk_size: int = 1000):
+                          chunk_size: int = 1000, model_path: str | None = None):
         """
         Predicts categories for all images in a directory and saves results to a CSV file.
         Handles large directories (30,000+ files) efficiently with batch processing.
@@ -982,6 +1290,18 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         :param recursive: Whether to search subdirectories
         :return:
         """
+
+        if model_path is not None:
+            if Path(model_path).is_file():
+                print(f"Loading model from {model_path} for evaluation...")
+                checkpoint = torch.load(model_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                print(f"Model loaded from epoch {checkpoint['epoch']+1} with loss {checkpoint['loss']:.4f}.")
+            else:
+                print(f"Loading from directory {model_path} using HF Hub mixin...")
+                self.load_model(load_directory=model_path, revision=model_path.split("_")[-1] if "_" in model_path else "main")
+
+      
         folder_path = Path(folder_path)
 
         images = directory_scraper(Path(folder_path), self.file_format)
@@ -1002,16 +1322,22 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         for batch_start in range(0, len(images), chunk_size):
             batch_end = min(batch_start + chunk_size, len(images))
             batch_images = images[batch_start:batch_end]
+            #self.debug_report(img_path=batch_images[0])
 
             # --- FIX: Renamed lists for clarity ---
             all_scores_list, tru_images = [], []
+            #print("[PREDICT MODEL PARAM HASH]", self.model_param_hash())
 
             # Process batch
             for img_path in tqdm(batch_images,
                                  desc=f"Processing batch {batch_start // chunk_size + 1}/{(len(images) - 1) // chunk_size + 1}"):
                 try:
                     image = Image.open(img_path)
+                    image.load()
                     image_input = self.preprocess(image).unsqueeze(0).to(self.device)
+                    #print("[PREDICT RAW MODE]", image_input.mode)
+                    #print("[PREDICT RAW SIZE]", image_input.size)
+                    #print("[PREDICT FILE PATH]", img_path)
                     scores, indices, raw_scores = self.top_N_prediction(image_input, self.top_N)
 
                     # --- FIX: Always append the full raw_scores list. Remove res_list (indices). ---
@@ -1314,18 +1640,18 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
     def plot_prompt_embeddings(self, dataloader, batch_idx=0, max_chars=300):
         """
         Plots CLIP text embeddings for prompts in a single batch.
-        Similar to _get_averaged_text_features(), but for per-image prompts.
+        Now uses labels instead of p0, p1, ...
         """
 
         import matplotlib.pyplot as plt
         import os
         from itertools import islice
 
-        # Hämta en batch
+        # Hämta batch
         batch = next(islice(dataloader, batch_idx, None))
         images, class_ids, prompts = batch
 
-        # Trunka långa prompts (CLIP max 77 tokens)
+        # Trunka långa prompts
         prompts = [p[:max_chars] for p in prompts]
 
         # Tokenisera
@@ -1335,9 +1661,14 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             text_features = self.model.encode_text(tokens)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # Medelvärde
+        # Mean embedding
         mean_features = text_features.mean(dim=0)
         mean_features = mean_features / mean_features.norm()
+
+        # --- LABELS ---
+        # Om du har en mapping i klassen:
+        #   self.id_to_label = {0: "letter", 1: "photo", ...}
+        labels = [self.id_to_label[int(cid)] for cid in class_ids]
 
         # --- PLOTTING ---
         num_prompts = text_features.shape[0]
@@ -1348,15 +1679,16 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         for i in range(num_prompts):
             axes[i].imshow(text_features[i].unsqueeze(0).cpu().numpy(),
                         aspect="auto", cmap="viridis")
-            axes[i].set_ylabel(f"p{i}", rotation=0, labelpad=20)
+            axes[i].set_ylabel(labels[i], rotation=0, labelpad=20)
             axes[i].set_yticks([])
 
+        # Mean embedding subplot
         axes[-1].imshow(mean_features.unsqueeze(0).cpu().numpy(),
                         aspect="auto", cmap="viridis")
         axes[-1].set_ylabel("mean", rotation=0, labelpad=20)
         axes[-1].set_yticks([])
 
-        plt.suptitle("Prompt embedding dimensions (batch {})".format(batch_idx))
+        plt.suptitle(f"Prompt embedding dimensions (batch {batch_idx})")
         plt.xlabel("embedding dimension")
         plt.tight_layout()
 
@@ -1365,6 +1697,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         plt.savefig(outdir / f"{self.model_code_name}_batch{batch_idx}_prompt_embeddings.png")
 
         print(f"Saved prompt embedding plot for batch {batch_idx} → {outdir}")
+
 
     def plot_image_embeddings_2d_old(self, dataloader, labels, n_batches=100, method="pca"):
         """
@@ -1465,7 +1798,7 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
         table_path = Path(f'{self.output_dir}/tables')
         plot_path.mkdir(parents=True, exist_ok=True)
         time_stamp = time.strftime("%Y%m%d-%H%M")
-
+        plot_path= plot_path / f'{time_stamp}_{n_batches}{"_zero" if self.zero_shot else ""}_image_embeddings_-{self.top_N}_{self.model_code_name}.png'
 
         all_image_feats = []
         all_text_feats = []
@@ -1547,10 +1880,10 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
             plt.ylabel("PCA 2")
             plt.legend(title="Class ID", bbox_to_anchor=(1.05, 1), loc="upper left")
             plt.tight_layout()
-            outfile = outdir / f"{self.model_code_name}_{fname_suffix}_{method}_{n_batches}batches.png"
-            plt.savefig(outfile)
+            #outfile = outdir / f"{self.model_code_name}_{fname_suffix}_{method}_{n_batches}batches.png"
+            plt.savefig(plot_path)
             plt.close()
-            print(f"Saved {title_suffix} plot → {outfile}")
+            print(f"Saved {title_suffix} plot → {plot_path}")
 
         # --- 3. Plot image embeddings ---
         reduce_and_plot(all_image_feats, all_classes, "Image Embeddings", "image_embeddings")
@@ -1791,6 +2124,84 @@ class CLIP(nn.Module, PyTorchModelHubMixin):
 
         return mapping, reduced, labels
 
+    import hashlib
+    #import torch
+    #import numpy as np
+    #from PIL import Image
+
+    def model_param_hash(self):
+        total = 0.0
+        for p in self.model.parameters():
+            total += float(p.sum())
+        return total
+
+
+    def tensor_sha1(self,t):
+        return hashlib.sha1(t.cpu().numpy().tobytes()).hexdigest()
+
+    def model_hash(self,model):
+        total = 0.0
+        for p in model.parameters():
+            total += float(p.sum())
+        return total
+
+    def debug_report(self, img_path=None):
+        print("\n================ DEBUG REPORT ================")
+
+        # ----------------------------------------------------
+        # 1. RAW IMAGE (only if img_path is provided)
+        # ----------------------------------------------------
+        if img_path is not None:
+            img = Image.open(img_path)
+            img.load()
+            print("[RAW MODE]", img.mode)
+            print("[RAW SIZE]", img.size)
+
+            # RAW SHA1
+            raw_sha1 = hashlib.sha1(np.array(img).tobytes()).hexdigest()
+            print("[RAW SHA1]", raw_sha1)
+
+            # ----------------------------------------------------
+            # 2. PREPROCESS RESULT
+            # ----------------------------------------------------
+            pre = self.preprocess(img)
+            print("[PREPROCESS SHAPE]", tuple(pre.shape))
+            print("[PREPROCESS SHA1]", self.tensor_sha1(pre))
+
+            # IMAGE FEATURES
+            with torch.no_grad():
+                img_feat = self.model.encode_image(pre.unsqueeze(0).to(self.device))
+            print("[IMAGE FEATURE HASH]", float(img_feat.sum()))
+
+        # ----------------------------------------------------
+        # 3. PROMPTS
+        # ----------------------------------------------------
+        if hasattr(self, "prompts"):
+            prompt_str = " ".join(self.prompts)
+            print("[PROMPTS HASH]", hashlib.sha1(prompt_str.encode()).hexdigest())
+            print("[PROMPT COUNT]", len(self.prompts))
+
+        # ----------------------------------------------------
+        # 4. MODEL ARCHITECTURE
+        # ----------------------------------------------------
+        print("[MODEL CLASS]", self.model.__class__)
+
+        # ----------------------------------------------------
+        # 5. MODEL WEIGHT HASH
+        # ----------------------------------------------------
+        print("[MODEL PARAM HASH]", self.model_hash(self.model))
+
+        # ----------------------------------------------------
+        # 6. TEXT EMBEDDINGS
+        # ----------------------------------------------------
+        if hasattr(self, "text_tokens"):
+            with torch.no_grad():
+                txt_feat = self.model.encode_text(self.text_tokens)
+            print("[TEXT FEATURE HASH]", float(txt_feat.sum()))
+
+        print("=============== END DEBUG REPORT ===============\n")
+
+
 def split_data_80_10_10(files: list, labels: list, random_seed: int, max_categ: int,
                         safe_check: bool = True):
     """
@@ -1912,7 +2323,5 @@ def split_data_80_10_10(files: list, labels: list, random_seed: int, max_categ: 
     train_labels = labels[train_indices]
 
     return train_files, val_files, test_files, train_labels, val_labels, test_labels
-
-    
 
 
